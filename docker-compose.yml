@@ -13,6 +13,7 @@ services:
       - DB_PASSWORD=${DB_PASSWORD}
       - DB_NAME=${DB_NAME}
       - BOT_DEBUG=${BOT_DEBUG}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
     depends_on:
       - db
     networks:

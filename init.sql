@@ -7,3 +7,6 @@ CREATE TABLE IF NOT EXISTS messages
     text       TEXT,
     date       DATETIME NOT NULL
 );
+
+CREATE INDEX idx_date ON messages(date);
+CREATE INDEX idx_message_id ON messages(message_id);

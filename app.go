@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"pet.outbid.goapp/api"
 	"pet.outbid.goapp/db"
 	"strconv"
 	"time"
@@ -141,8 +142,8 @@ func handleCommand(bot *tgbotapi.BotAPI, message *tgbotapi.Message) {
 		handleGetTimeCommand(bot, message)
 	case "getinfo":
 		handleGetInfoCommand(bot, message)
-	case "echo":
-		handleEchoCommand(bot, message)
+	case "gpt":
+		handleGptCommand(bot, message)
 	default:
 		handleUnknownCommand(bot, message)
 	}
@@ -153,7 +154,7 @@ func handleHelpCommand(bot *tgbotapi.BotAPI, message *tgbotapi.Message) {
 		"/help - List available commands\n" +
 		"/gettime - Get the current server time\n" +
 		"/getinfo - Get your account information\n" +
-		"/echo - Echo back your message"
+		"/gpt - Forward message to gpt"
 	msg := tgbotapi.NewMessage(message.Chat.ID, helpText)
 	sendMessage(bot, msg)
 }
@@ -181,14 +182,41 @@ func handleGetInfoCommand(bot *tgbotapi.BotAPI, message *tgbotapi.Message) {
 	sendMessage(bot, msg)
 }
 
-func handleEchoCommand(bot *tgbotapi.BotAPI, message *tgbotapi.Message) {
+func handleGptCommand(bot *tgbotapi.BotAPI, message *tgbotapi.Message) {
 	args := message.CommandArguments()
 	if args == "" {
-		msg := tgbotapi.NewMessage(message.Chat.ID, "Please provide a message to echo.")
+		msg := tgbotapi.NewMessage(message.Chat.ID, "Please provide a message for GPT.")
 		sendMessage(bot, msg)
 		return
 	}
-	msg := tgbotapi.NewMessage(message.Chat.ID, args)
+
+	requestBody := api.ChatCompletionRequest{
+		Model: "gpt-3.5-turbo-0125",
+		Messages: []api.Message{
+			{
+				Role:    "system",
+				Content: "You are a helpful assistant.",
+			},
+			{
+				Role:    "user",
+				Content: args,
+			},
+		},
+	}
+
+	completionResponse, err := api.GetChatCompletion(os.Getenv("OPENAI_API_KEY"), requestBody)
+	if err != nil {
+		fmt.Printf("Error getting chat completion: %v\n", err)
+		return
+	}
+
+	var txt string
+	if len(completionResponse.Choices) > 0 {
+		txt = completionResponse.Choices[0].Message.Content
+	} else {
+		txt = "No choices in response"
+	}
+	msg := tgbotapi.NewMessage(message.Chat.ID, txt)
 	sendMessage(bot, msg)
 }
 
