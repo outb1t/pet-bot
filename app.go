@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"pet.outbid.goapp/db"
 	"strconv"
 	"time"
 
@@ -24,7 +25,12 @@ func main() {
 		log.Panic(err)
 	}
 
-	bot.Debug = true
+	if err := db.InitDB(); err != nil {
+		log.Fatalf("Failed to initialize database: %v", err)
+	}
+	defer db.DB.Close()
+
+	bot.Debug = os.Getenv("BOT_DEBUG") == "1"
 
 	log.Printf("Authorized on account %s", bot.Self.UserName)
 	log.Printf("Bot restricted to chat ID: %d", allowedChatID)
@@ -98,9 +104,27 @@ func getInt64FromEnv(name string) int64 {
 }
 
 func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message) {
-	//log.Printf("Received message from chat ID: %d", message.Chat.ID)
-	replyText := fmt.Sprintf("Text: %s", message.Text)
-	fmt.Println(replyText)
+	var text string
+
+	if message.Text != "" {
+		text = message.Text
+	} else if message.Caption != "" {
+		text = message.Caption
+	} else {
+		log.Printf("Received non-text message without caption (message_id: %d), ignoring.", message.MessageID)
+		return
+	}
+
+	err := db.SaveMessage(
+		message.MessageID,
+		message.Chat.ID,
+		message.From.ID,
+		text,
+		message.Date,
+	)
+	if err != nil {
+		log.Printf("Error saving message: %v", err)
+	}
 }
 
 func sendMessage(bot *tgbotapi.BotAPI, msg tgbotapi.Chattable) {
