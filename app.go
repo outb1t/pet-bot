@@ -221,7 +221,7 @@ func handleGptCommand(message *tgbotapi.Message) {
 	}
 
 	requestBody := api.ChatCompletionRequest{
-		Model: "gpt-3.5-turbo-0125",
+		Model: "gpt-4o",
 		Messages: []api.Message{
 			{
 				Role:    "system",
@@ -247,6 +247,7 @@ func handleGptCommand(message *tgbotapi.Message) {
 		txt = "No choices in response"
 	}
 	msg := tgbotapi.NewMessage(message.Chat.ID, txt)
+	msg.ReplyToMessageID = message.MessageID
 	sendMessage(msg)
 }
 
@@ -271,7 +272,7 @@ func handleMention(message *tgbotapi.Message) {
 	}
 
 	requestBody := api.ChatCompletionRequest{
-		Model: "gpt-3.5-turbo-0125",
+		Model: "gpt-4o",
 		Messages: []api.Message{
 			{
 				Role:    "system",
@@ -298,6 +299,7 @@ func handleMention(message *tgbotapi.Message) {
 	}
 
 	msg := tgbotapi.NewMessage(message.Chat.ID, gptResponseText)
+	msg.ReplyToMessageID = message.MessageID
 	sendMessage(msg)
 }
 
