@@ -12,21 +12,25 @@ import (
 	"strings"
 )
 
-var apiKey string
-
 var bot *tgbotapi.BotAPI
 var botUsername string
-
-var systemPrompt string
-
 var allowedChatID int64
+
+var openAIToken string
+var systemPrompt string
+var gptModelForChatting string
+var gptModelForGptCommand string
 
 func main() {
 	botToken := getStringFromEnv("TELEGRAM_BOT_TOKEN")
-	apiKey = getStringFromEnv("OPENAI_API_KEY")
-
 	allowedChatID = getInt64FromEnv("ALLOWED_CHAT_ID")
 	adminChatID := getInt64FromEnv("ADMIN_CHAT_ID")
+
+	openAIToken = getStringFromEnv("OPENAI_API_KEY")
+	gptModelForChatting = getStringFromEnv("GPT_MODEL_FOR_CHATTING")
+	fmt.Printf("Bot chat model: %s\n", gptModelForChatting)
+	gptModelForGptCommand = getStringFromEnv("GPT_MODEL_FOR_GPT_COMMAND")
+	fmt.Printf("Bot /gpt model: %s\n", gptModelForGptCommand)
 
 	systemPromptData, err := os.ReadFile("system-prompt.md")
 	if err != nil {
@@ -206,7 +210,7 @@ func handleGetInfoCommand(message *tgbotapi.Message) {
 	if user.UserName != "" {
 		info += "Username: @" + user.UserName + "\n"
 	}
-	info += "User ID: " + strconv.FormatInt(int64(user.ID), 10)
+	info += "User ID: " + strconv.FormatInt(user.ID, 10)
 
 	msg := tgbotapi.NewMessage(message.Chat.ID, info)
 	sendMessage(msg)
@@ -221,7 +225,7 @@ func handleGptCommand(message *tgbotapi.Message) {
 	}
 
 	requestBody := api.ChatCompletionRequest{
-		Model: "gpt-4o",
+		Model: gptModelForGptCommand,
 		Messages: []api.Message{
 			{
 				Role:    "system",
@@ -234,7 +238,7 @@ func handleGptCommand(message *tgbotapi.Message) {
 		},
 	}
 
-	completionResponse, err := api.GetChatCompletion(apiKey, requestBody)
+	completionResponse, err := api.GetChatCompletion(openAIToken, requestBody)
 	if err != nil {
 		fmt.Printf("Error getting chat completion: %v\n", err)
 		return
@@ -268,11 +272,11 @@ func handleMention(message *tgbotapi.Message) {
 
 	fullSystemPrompt := systemPrompt
 	if messagesString != "" {
-		fullSystemPrompt += "\nChat history:\n" + messagesString
+		fullSystemPrompt += "\n\n**Chat history:**\n" + messagesString
 	}
 
 	requestBody := api.ChatCompletionRequest{
-		Model: "gpt-4o",
+		Model: gptModelForChatting,
 		Messages: []api.Message{
 			{
 				Role:    "system",
@@ -285,7 +289,7 @@ func handleMention(message *tgbotapi.Message) {
 		},
 	}
 
-	completionResponse, err := api.GetChatCompletion(apiKey, requestBody)
+	completionResponse, err := api.GetChatCompletion(openAIToken, requestBody)
 	if err != nil {
 		fmt.Printf("Error getting chat completion: %v\n", err)
 		return
