@@ -21,6 +21,8 @@ var systemPrompt string
 var gptModelForChatting string
 var gptModelForGptCommand string
 
+var usernames = make(map[int64]string)
+
 func main() {
 	botToken := getStringFromEnv("TELEGRAM_BOT_TOKEN")
 	allowedChatID = getInt64FromEnv("ALLOWED_CHAT_ID")
@@ -88,7 +90,7 @@ func worker(bot *tgbotapi.BotAPI, jobs <-chan tgbotapi.Update, adminChatID int64
 func handleUpdate(bot *tgbotapi.BotAPI, update tgbotapi.Update, adminChatID int64) {
 	if update.Message.Chat.ID != allowedChatID {
 		alertMsg := tgbotapi.NewMessage(adminChatID, fmt.Sprintf("Unauthorized access attempt from chat ID: %d", update.Message.Chat.ID))
-		sendMessage(alertMsg)
+		sendMessage(alertMsg, false)
 		if update.Message.Chat.IsPrivate() {
 			fmt.Println("Private chat message, continue")
 			return
@@ -131,7 +133,6 @@ func getInt64FromEnv(name string) int64 {
 
 func handleMessage(message *tgbotapi.Message) {
 	var text string
-
 	if message.Text != "" {
 		text = message.Text
 	} else if message.Caption != "" {
@@ -141,38 +142,26 @@ func handleMessage(message *tgbotapi.Message) {
 		return
 	}
 
-	err := db.SaveMessage(
-		message.MessageID,
-		message.Chat.ID,
-		message.From.ID,
-		text,
-		message.Date,
-	)
-	if err != nil {
-		log.Printf("Error saving message: %v", err)
-	}
-
-	if strings.Contains(message.Text, botUsername) {
+	if strings.Contains(text, botUsername) {
 		handleMention(message)
+	} else {
+		saveMessage(message, text)
 	}
 }
 
-func sendMessage(msg tgbotapi.Chattable) {
+func sendMessage(msg tgbotapi.Chattable, saveOptions ...bool) {
+	save := true
+	if len(saveOptions) > 0 {
+		save = saveOptions[0]
+	}
+
 	newMessage, err := bot.Send(msg)
 	if err != nil {
 		log.Printf("Error sending message: %v", err)
-		return
 	}
-	savingError := db.SaveMessage(
-		newMessage.MessageID,
-		newMessage.Chat.ID,
-		newMessage.From.ID,
-		newMessage.Text,
-		newMessage.Date,
-	)
 
-	if savingError != nil {
-		log.Printf("Error saving message: %v", savingError)
+	if save {
+		saveMessage(&newMessage)
 	}
 }
 
@@ -196,7 +185,7 @@ func handleHelpCommand(message *tgbotapi.Message) {
 		"/gpt - Forward message to gpt\n" +
 		"Tag me @buddy_bro_pet_bot if you want to chat with me"
 	msg := tgbotapi.NewMessage(message.Chat.ID, helpText)
-	sendMessage(msg)
+	sendMessage(msg, false)
 }
 
 func handleGetInfoCommand(message *tgbotapi.Message) {
@@ -213,16 +202,17 @@ func handleGetInfoCommand(message *tgbotapi.Message) {
 	info += "User ID: " + strconv.FormatInt(user.ID, 10)
 
 	msg := tgbotapi.NewMessage(message.Chat.ID, info)
-	sendMessage(msg)
+	sendMessage(msg, false)
 }
 
 func handleGptCommand(message *tgbotapi.Message) {
 	args := message.CommandArguments()
 	if args == "" {
 		msg := tgbotapi.NewMessage(message.Chat.ID, "Please provide a message for GPT.")
-		sendMessage(msg)
+		sendMessage(msg, false)
 		return
 	}
+	saveMessage(message, args)
 
 	requestBody := api.ChatCompletionRequest{
 		Model: gptModelForGptCommand,
@@ -260,9 +250,11 @@ func handleMention(message *tgbotapi.Message) {
 	if strings.Trim(text, ":?! ") == botUsername {
 		phraseVar := fmt.Sprintf("BOT_DEFAULT_PHRASE%d", rand.Intn(8)+1)
 		msg := tgbotapi.NewMessage(message.Chat.ID, getStringFromEnv(phraseVar))
-		sendMessage(msg)
+		sendMessage(msg, false)
 		return
 	}
+
+	saveMessage(message)
 
 	messagesString, err := getFormattedMessages(30)
 	if err != nil {
@@ -306,8 +298,6 @@ func handleMention(message *tgbotapi.Message) {
 	msg.ReplyToMessageID = message.MessageID
 	sendMessage(msg)
 }
-
-var usernames = make(map[int64]string)
 
 func getFormattedMessages(limit int) (string, error) {
 	messages, err := db.GetLastMessages(allowedChatID, limit)
@@ -354,5 +344,30 @@ func getFormattedMessages(limit int) (string, error) {
 
 func handleUnknownCommand(message *tgbotapi.Message) {
 	msg := tgbotapi.NewMessage(message.Chat.ID, "Sorry, I don't recognize that command. Type /help to see available commands.")
-	sendMessage(msg)
+	sendMessage(msg, false)
+}
+
+func saveMessage(message *tgbotapi.Message, texts ...string) {
+	var text string
+	if len(texts) > 0 {
+		text = texts[0]
+	} else {
+		text = message.Text
+	}
+
+	if text == "" {
+		log.Printf("Skip saving, empty message from user: %s", message.From.UserName)
+		return
+	}
+
+	err := db.SaveMessage(
+		message.MessageID,
+		message.Chat.ID,
+		message.From.ID,
+		text,
+		message.Date,
+	)
+	if err != nil {
+		log.Printf("Error saving message: %v", err)
+	}
 }
