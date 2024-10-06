@@ -22,6 +22,7 @@ WORKDIR /app
 
 # Copy the built binary from the builder stage
 COPY --from=builder /app/app .
+COPY system-prompt.md .
 
 # Command to run when starting the container
 CMD ["./app"]

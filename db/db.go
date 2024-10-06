@@ -5,11 +5,20 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 )
 
 var DB *sql.DB
+
+type Message struct {
+	MessageID int
+	ChatID    int64
+	UserID    int64
+	Text      string
+	Date      time.Time
+}
 
 func InitDB() error {
 	var err error
@@ -47,4 +56,39 @@ func SaveMessage(messageID int, chatID int64, userID int64, text string, date in
 		return err
 	}
 	return nil
+}
+
+func GetLastMessages(chatID int64, limit int) ([]Message, error) {
+	query := `
+        SELECT *
+        FROM (
+            SELECT message_id, chat_id, user_id, text, date
+            FROM messages
+            WHERE chat_id = ?
+            ORDER BY date DESC
+            LIMIT ?
+        ) sub
+        ORDER BY message_id
+    `
+
+	rows, err := DB.Query(query, chatID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("Error querying messages: %v", err)
+	}
+	defer rows.Close()
+
+	var messages []Message
+	for rows.Next() {
+		var msg Message
+		if err := rows.Scan(&msg.MessageID, &msg.ChatID, &msg.UserID, &msg.Text, &msg.Date); err != nil {
+			return nil, fmt.Errorf("Error scanning row: %v", err)
+		}
+		messages = append(messages, msg)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("Error with rows: %v", err)
+	}
+
+	return messages, nil
 }

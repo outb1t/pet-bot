@@ -2,54 +2,70 @@ package main
 
 import (
 	"fmt"
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"log"
+	"math/rand"
 	"os"
 	"pet.outbid.goapp/api"
 	"pet.outbid.goapp/db"
 	"strconv"
-	"time"
-
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"strings"
 )
 
-func main() {
-	botToken := os.Getenv("TELEGRAM_BOT_TOKEN")
-	if botToken == "" {
-		log.Fatal("TELEGRAM_BOT_TOKEN environment variable not set")
-	}
+var apiKey string
 
-	allowedChatID := getInt64FromEnv("ALLOWED_CHAT_ID")
+var bot *tgbotapi.BotAPI
+var botUsername string
+
+var systemPrompt string
+
+var allowedChatID int64
+
+func main() {
+	botToken := getStringFromEnv("TELEGRAM_BOT_TOKEN")
+	apiKey = getStringFromEnv("OPENAI_API_KEY")
+
+	allowedChatID = getInt64FromEnv("ALLOWED_CHAT_ID")
 	adminChatID := getInt64FromEnv("ADMIN_CHAT_ID")
 
-	bot, err := tgbotapi.NewBotAPI(botToken)
+	systemPromptData, err := os.ReadFile("system-prompt.md")
 	if err != nil {
-		log.Panic(err)
+		log.Fatal(err)
 	}
+	systemPrompt = string(systemPromptData)
+	fmt.Printf("systemPrompt: %s", systemPrompt)
+
+	var botErr error
+	bot, botErr = tgbotapi.NewBotAPI(botToken)
+	if botErr != nil {
+		log.Panic(botErr)
+	}
+	bot.Debug = os.Getenv("BOT_DEBUG") == "1"
+	botUsername = "@" + bot.Self.UserName
+	fmt.Printf("Bot name: %s\n", botUsername)
 
 	if err := db.InitDB(); err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
 	defer db.DB.Close()
 
-	bot.Debug = os.Getenv("BOT_DEBUG") == "1"
-
-	log.Printf("Authorized on account %s", bot.Self.UserName)
+	log.Printf("Authorized on account %s", botUsername)
 	log.Printf("Bot restricted to chat ID: %d", allowedChatID)
 
+	handleUpdates(adminChatID)
+}
+
+func handleUpdates(adminChatID int64) {
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
 
 	updates := bot.GetUpdatesChan(u)
 
-	handleUpdates(bot, updates, allowedChatID, adminChatID)
-}
-
-func handleUpdates(bot *tgbotapi.BotAPI, updates tgbotapi.UpdatesChannel, allowedChatID int64, adminChatID int64) {
 	const workerCount = 5
 	jobs := make(chan tgbotapi.Update, 100)
 
 	for i := 0; i < workerCount; i++ {
-		go worker(bot, jobs, allowedChatID, adminChatID)
+		go worker(bot, jobs, adminChatID)
 	}
 
 	for update := range updates {
@@ -59,16 +75,16 @@ func handleUpdates(bot *tgbotapi.BotAPI, updates tgbotapi.UpdatesChannel, allowe
 	}
 }
 
-func worker(bot *tgbotapi.BotAPI, jobs <-chan tgbotapi.Update, allowedChatID int64, adminChatID int64) {
+func worker(bot *tgbotapi.BotAPI, jobs <-chan tgbotapi.Update, adminChatID int64) {
 	for update := range jobs {
-		handleUpdate(bot, update, allowedChatID, adminChatID)
+		handleUpdate(bot, update, adminChatID)
 	}
 }
 
-func handleUpdate(bot *tgbotapi.BotAPI, update tgbotapi.Update, allowedChatID int64, adminChatID int64) {
+func handleUpdate(bot *tgbotapi.BotAPI, update tgbotapi.Update, adminChatID int64) {
 	if update.Message.Chat.ID != allowedChatID {
 		alertMsg := tgbotapi.NewMessage(adminChatID, fmt.Sprintf("Unauthorized access attempt from chat ID: %d", update.Message.Chat.ID))
-		sendMessage(bot, alertMsg)
+		sendMessage(alertMsg)
 		if update.Message.Chat.IsPrivate() {
 			fmt.Println("Private chat message, continue")
 			return
@@ -86,17 +102,22 @@ func handleUpdate(bot *tgbotapi.BotAPI, update tgbotapi.Update, allowedChatID in
 	}
 
 	if update.Message.IsCommand() {
-		handleCommand(bot, update.Message)
+		handleCommand(update.Message)
 	} else {
-		handleMessage(bot, update.Message)
+		handleMessage(update.Message)
 	}
 }
 
-func getInt64FromEnv(name string) int64 {
+func getStringFromEnv(name string) string {
 	envVar := os.Getenv(name)
 	if envVar == "" {
 		log.Fatalf("%s environment variable not set", name)
 	}
+	return envVar
+}
+
+func getInt64FromEnv(name string) int64 {
+	envVar := getStringFromEnv(name)
 	envVarInt64, err := strconv.ParseInt(envVar, 10, 64)
 	if err != nil {
 		log.Fatalf("Invalid %s: %v", name, err)
@@ -104,7 +125,7 @@ func getInt64FromEnv(name string) int64 {
 	return envVarInt64
 }
 
-func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message) {
+func handleMessage(message *tgbotapi.Message) {
 	var text string
 
 	if message.Text != "" {
@@ -126,46 +147,42 @@ func handleMessage(bot *tgbotapi.BotAPI, message *tgbotapi.Message) {
 	if err != nil {
 		log.Printf("Error saving message: %v", err)
 	}
+
+	if strings.Contains(message.Text, botUsername) {
+		handleMention(message)
+	}
 }
 
-func sendMessage(bot *tgbotapi.BotAPI, msg tgbotapi.Chattable) {
+func sendMessage(msg tgbotapi.Chattable) {
 	if _, err := bot.Send(msg); err != nil {
 		log.Printf("Error sending message: %v", err)
 	}
 }
 
-func handleCommand(bot *tgbotapi.BotAPI, message *tgbotapi.Message) {
+func handleCommand(message *tgbotapi.Message) {
 	switch message.Command() {
 	case "help":
-		handleHelpCommand(bot, message)
-	case "gettime":
-		handleGetTimeCommand(bot, message)
+		handleHelpCommand(message)
 	case "getinfo":
-		handleGetInfoCommand(bot, message)
+		handleGetInfoCommand(message)
 	case "gpt":
-		handleGptCommand(bot, message)
+		handleGptCommand(message)
 	default:
-		handleUnknownCommand(bot, message)
+		handleUnknownCommand(message)
 	}
 }
 
-func handleHelpCommand(bot *tgbotapi.BotAPI, message *tgbotapi.Message) {
+func handleHelpCommand(message *tgbotapi.Message) {
 	helpText := "Available commands:\n" +
 		"/help - List available commands\n" +
-		"/gettime - Get the current server time\n" +
 		"/getinfo - Get your account information\n" +
-		"/gpt - Forward message to gpt"
+		"/gpt - Forward message to gpt\n" +
+		"Tag me @buddy_bro_pet_bot if you want to chat with me"
 	msg := tgbotapi.NewMessage(message.Chat.ID, helpText)
-	sendMessage(bot, msg)
+	sendMessage(msg)
 }
 
-func handleGetTimeCommand(bot *tgbotapi.BotAPI, message *tgbotapi.Message) {
-	currentTime := time.Now().Format("Mon Jan 2 15:04:05 MST 2006")
-	msg := tgbotapi.NewMessage(message.Chat.ID, "Current server time: "+currentTime)
-	sendMessage(bot, msg)
-}
-
-func handleGetInfoCommand(bot *tgbotapi.BotAPI, message *tgbotapi.Message) {
+func handleGetInfoCommand(message *tgbotapi.Message) {
 	user := message.From
 	info := "Your Account Information:\n" +
 		"First Name: " + user.FirstName + "\n"
@@ -179,14 +196,14 @@ func handleGetInfoCommand(bot *tgbotapi.BotAPI, message *tgbotapi.Message) {
 	info += "User ID: " + strconv.FormatInt(int64(user.ID), 10)
 
 	msg := tgbotapi.NewMessage(message.Chat.ID, info)
-	sendMessage(bot, msg)
+	sendMessage(msg)
 }
 
-func handleGptCommand(bot *tgbotapi.BotAPI, message *tgbotapi.Message) {
+func handleGptCommand(message *tgbotapi.Message) {
 	args := message.CommandArguments()
 	if args == "" {
 		msg := tgbotapi.NewMessage(message.Chat.ID, "Please provide a message for GPT.")
-		sendMessage(bot, msg)
+		sendMessage(msg)
 		return
 	}
 
@@ -204,7 +221,7 @@ func handleGptCommand(bot *tgbotapi.BotAPI, message *tgbotapi.Message) {
 		},
 	}
 
-	completionResponse, err := api.GetChatCompletion(os.Getenv("OPENAI_API_KEY"), requestBody)
+	completionResponse, err := api.GetChatCompletion(apiKey, requestBody)
 	if err != nil {
 		fmt.Printf("Error getting chat completion: %v\n", err)
 		return
@@ -217,10 +234,106 @@ func handleGptCommand(bot *tgbotapi.BotAPI, message *tgbotapi.Message) {
 		txt = "No choices in response"
 	}
 	msg := tgbotapi.NewMessage(message.Chat.ID, txt)
-	sendMessage(bot, msg)
+	sendMessage(msg)
 }
 
-func handleUnknownCommand(bot *tgbotapi.BotAPI, message *tgbotapi.Message) {
+func handleMention(message *tgbotapi.Message) {
+	text := message.Text
+	if strings.Trim(text, ":?! ") == botUsername {
+		phraseVar := fmt.Sprintf("BOT_DEFAULT_PHRASE%d", rand.Intn(8)+1)
+		msg := tgbotapi.NewMessage(message.Chat.ID, getStringFromEnv(phraseVar))
+		sendMessage(msg)
+		return
+	}
+
+	messagesString, err := getFormattedMessages(30)
+	if err != nil {
+		log.Printf("Error getting formatted messages: %v", err)
+		return
+	}
+
+	fullSystemPrompt := systemPrompt
+	if messagesString != "" {
+		fullSystemPrompt += "\nChat history:\n" + messagesString
+	}
+
+	requestBody := api.ChatCompletionRequest{
+		Model: "gpt-3.5-turbo-0125",
+		Messages: []api.Message{
+			{
+				Role:    "system",
+				Content: fullSystemPrompt,
+			},
+			{
+				Role:    "user",
+				Content: text,
+			},
+		},
+	}
+
+	completionResponse, err := api.GetChatCompletion(apiKey, requestBody)
+	if err != nil {
+		fmt.Printf("Error getting chat completion: %v\n", err)
+		return
+	}
+
+	var gptResponseText string
+	if len(completionResponse.Choices) > 0 {
+		gptResponseText = completionResponse.Choices[0].Message.Content
+	} else {
+		gptResponseText = "No choices in response"
+	}
+
+	msg := tgbotapi.NewMessage(message.Chat.ID, gptResponseText)
+	sendMessage(msg)
+}
+
+var usernames = make(map[int64]string)
+
+func getFormattedMessages(limit int) (string, error) {
+	messages, err := db.GetLastMessages(allowedChatID, limit)
+	if err != nil {
+		return "", fmt.Errorf("Error retrieving messages: %v", err)
+	}
+
+	var sb strings.Builder
+
+	for _, msg := range messages {
+		username, exists := usernames[msg.UserID]
+		if !exists {
+			chatMemberConfig := tgbotapi.GetChatMemberConfig{
+				ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
+					ChatID: allowedChatID,
+					UserID: msg.UserID,
+				},
+			}
+
+			chatMember, err := bot.GetChatMember(chatMemberConfig)
+			if err != nil {
+				log.Printf("Error getting chat member for user ID %d: %v", msg.UserID, err)
+				username = fmt.Sprintf("User%d", msg.UserID) // Fallback to user ID
+			} else {
+				if chatMember.User.UserName != "" {
+					username = "@" + chatMember.User.UserName
+				} else if chatMember.User.FirstName != "" || chatMember.User.LastName != "" {
+					username = strings.TrimSpace(chatMember.User.FirstName + " " + chatMember.User.LastName)
+				} else {
+					username = fmt.Sprintf("User%d", msg.UserID)
+				}
+			}
+			usernames[msg.UserID] = username
+		}
+
+		formattedDate := msg.Date.Format("02.01.2006 15:04:05")
+
+		messageLine := fmt.Sprintf("%s %s : %s\n", formattedDate, username, msg.Text)
+		sb.WriteString(messageLine)
+	}
+
+	return sb.String(), nil
+}
+
+func handleUnknownCommand(message *tgbotapi.Message) {
 	msg := tgbotapi.NewMessage(message.Chat.ID, "Sorry, I don't recognize that command. Type /help to see available commands.")
-	sendMessage(bot, msg)
+	sendMessage(msg)
 }
