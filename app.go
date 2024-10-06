@@ -154,8 +154,21 @@ func handleMessage(message *tgbotapi.Message) {
 }
 
 func sendMessage(msg tgbotapi.Chattable) {
-	if _, err := bot.Send(msg); err != nil {
+	newMessage, err := bot.Send(msg)
+	if err != nil {
 		log.Printf("Error sending message: %v", err)
+		return
+	}
+	savingError := db.SaveMessage(
+		newMessage.MessageID,
+		newMessage.Chat.ID,
+		newMessage.From.ID,
+		newMessage.Text,
+		newMessage.Date,
+	)
+
+	if savingError != nil {
+		log.Printf("Error saving message: %v", savingError)
 	}
 }
 
