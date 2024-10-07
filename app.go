@@ -10,6 +10,7 @@ import (
 	"pet.outbid.goapp/db"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 var bot *tgbotapi.BotAPI
@@ -142,7 +143,9 @@ func handleMessage(message *tgbotapi.Message) {
 		return
 	}
 
-	if strings.Contains(text, botUsername) {
+	botTagged := strings.Contains(text, botUsername)
+	replyToBotMessage := message.ReplyToMessage != nil && bot.Self.ID == message.ReplyToMessage.From.ID
+	if botTagged || replyToBotMessage {
 		handleMention(message)
 	} else {
 		saveMessage(message, text)
@@ -256,7 +259,7 @@ func handleMention(message *tgbotapi.Message) {
 
 	saveMessage(message)
 
-	messagesString, err := getFormattedMessages(30)
+	messagesString, err := getFormattedMessages(40)
 	if err != nil {
 		log.Printf("Error getting formatted messages: %v", err)
 		return
@@ -265,6 +268,10 @@ func handleMention(message *tgbotapi.Message) {
 	fullSystemPrompt := systemPrompt
 	if messagesString != "" {
 		fullSystemPrompt += "\n\n**Chat history:**\n" + messagesString
+	}
+
+	if message.ReplyToMessage != nil && bot.Self.ID == message.ReplyToMessage.From.ID {
+		text = fmt.Sprintf("\nthis is reply to your msg%d:\n ", message.ReplyToMessage.MessageID) + text
 	}
 
 	requestBody := api.ChatCompletionRequest{
@@ -330,12 +337,17 @@ func getFormattedMessages(limit int) (string, error) {
 					username = fmt.Sprintf("User%d", msg.UserID)
 				}
 			}
+
 			usernames[msg.UserID] = username
 		}
 
 		formattedDate := msg.Date.Format("02.01.2006 15:04:05")
 
-		messageLine := fmt.Sprintf("%s %s : %s\n", formattedDate, username, msg.Text)
+		if msg.UserID == bot.Self.ID && utf8.RuneCountInString(msg.Text) > 400 {
+			fmt.Printf("\nSkipping bot message %d", msg.MessageID)
+			continue
+		}
+		messageLine := fmt.Sprintf("msg%d %s %s : %s\n", msg.MessageID, formattedDate, username, msg.Text)
 		sb.WriteString(messageLine)
 	}
 
