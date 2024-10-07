@@ -58,7 +58,6 @@ func GetChatCompletion(apiKey string, requestBody ChatCompletionRequest) (*ChatC
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	fmt.Printf("GetChatCompletion Api token provided: %s \n", apiKey)
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", apiKey))
 
 	client := &http.Client{}

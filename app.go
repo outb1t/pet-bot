@@ -10,6 +10,7 @@ import (
 	"pet.outbid.goapp/db"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 )
 
@@ -22,7 +23,10 @@ var systemPrompt string
 var gptModelForChatting string
 var gptModelForGptCommand string
 
-var usernames = make(map[int64]string)
+var (
+	usernames     = make(map[int64]string)
+	usernamesLock sync.RWMutex
+)
 
 func main() {
 	botToken := getStringFromEnv("TELEGRAM_BOT_TOKEN")
@@ -315,7 +319,10 @@ func getFormattedMessages(limit int) (string, error) {
 	var sb strings.Builder
 
 	for _, msg := range messages {
+		usernamesLock.RLock()
 		username, exists := usernames[msg.UserID]
+		usernamesLock.RUnlock()
+
 		if !exists {
 			chatMemberConfig := tgbotapi.GetChatMemberConfig{
 				ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
@@ -338,7 +345,9 @@ func getFormattedMessages(limit int) (string, error) {
 				}
 			}
 
+			usernamesLock.Lock()
 			usernames[msg.UserID] = username
+			usernamesLock.Unlock()
 		}
 
 		formattedDate := msg.Date.Format("02.01.2006 15:04:05")
