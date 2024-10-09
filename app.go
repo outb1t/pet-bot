@@ -249,7 +249,7 @@ func handleMention(message *tgbotapi.Message) {
 	if strings.Trim(text, ":?! ") == botUsername {
 		phraseVar := fmt.Sprintf("BOT_DEFAULT_PHRASE%d", rand.Intn(8)+1)
 		msg := tgbotapi.NewMessage(message.Chat.ID, getStringFromEnv(phraseVar))
-		sendMessage(msg, false)
+		sendMessage(msg)
 		return
 	}
 
