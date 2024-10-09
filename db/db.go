@@ -2,9 +2,11 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"os"
+	"sync"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -19,6 +21,13 @@ type Message struct {
 	Text      string
 	Date      time.Time
 }
+
+var (
+	promptCache      string
+	promptCacheTime  time.Time
+	promptCacheMutex sync.RWMutex
+	cacheDuration    = 15 * time.Second
+)
 
 func InitDB() error {
 	var err error
@@ -91,4 +100,43 @@ func GetLastMessages(chatID int64, limit int) ([]Message, error) {
 	}
 
 	return messages, nil
+}
+
+func GetSystemPrompt() (string, error) {
+	promptCacheMutex.RLock()
+	if time.Since(promptCacheTime) < cacheDuration && promptCache != "" {
+		cachedPrompt := promptCache
+		promptCacheMutex.RUnlock()
+		return cachedPrompt, nil
+	}
+	promptCacheMutex.RUnlock()
+
+	promptCacheMutex.Lock()
+	defer promptCacheMutex.Unlock()
+
+	if time.Since(promptCacheTime) < cacheDuration && promptCache != "" {
+		return promptCache, nil
+	}
+
+	query := `
+        SELECT prompt
+        FROM prompts
+        WHERE type = ?
+        ORDER BY id DESC
+        LIMIT 1
+    `
+
+	var promptText string
+	err := DB.QueryRow(query, 1).Scan(&promptText)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", fmt.Errorf("no prompt found with type = 1")
+		}
+		return "", fmt.Errorf("error scanning row: %v", err)
+	}
+
+	promptCache = promptText
+	promptCacheTime = time.Now()
+
+	return promptText, nil
 }

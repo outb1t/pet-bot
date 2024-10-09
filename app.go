@@ -19,7 +19,6 @@ var botUsername string
 var allowedChatID int64
 
 var openAIToken string
-var systemPrompt string
 var gptModelForChatting string
 var gptModelForGptCommand string
 
@@ -38,13 +37,6 @@ func main() {
 	fmt.Printf("Bot chat model: %s\n", gptModelForChatting)
 	gptModelForGptCommand = getStringFromEnv("GPT_MODEL_FOR_GPT_COMMAND")
 	fmt.Printf("Bot /gpt model: %s\n", gptModelForGptCommand)
-
-	systemPromptData, err := os.ReadFile("system-prompt.md")
-	if err != nil {
-		log.Fatal(err)
-	}
-	systemPrompt = string(systemPromptData)
-	fmt.Printf("systemPrompt: %s", systemPrompt)
 
 	var botErr error
 	bot, botErr = tgbotapi.NewBotAPI(botToken)
@@ -269,9 +261,12 @@ func handleMention(message *tgbotapi.Message) {
 		return
 	}
 
-	fullSystemPrompt := systemPrompt
+	systemPrompt, err := db.GetSystemPrompt()
+	if err != nil {
+		log.Fatal(err)
+	}
 	if messagesString != "" {
-		fullSystemPrompt += "\n\n**Chat history:**\n" + messagesString
+		systemPrompt += "\n\n**Chat history:**\n" + messagesString
 	}
 
 	if message.ReplyToMessage != nil && bot.Self.ID == message.ReplyToMessage.From.ID {
@@ -283,7 +278,7 @@ func handleMention(message *tgbotapi.Message) {
 		Messages: []api.Message{
 			{
 				Role:    "system",
-				Content: fullSystemPrompt,
+				Content: systemPrompt,
 			},
 			{
 				Role:    "user",
