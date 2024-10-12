@@ -140,3 +140,16 @@ func GetSystemPrompt() (string, error) {
 
 	return promptText, nil
 }
+
+func InsertPrompt(promptText string, promptType int) error {
+	query := `
+        INSERT INTO prompts (type, prompt)
+        VALUES (?, ?)
+    `
+	_, err := DB.Exec(query, promptType, promptText)
+	if err != nil {
+		log.Printf("Error inserting prompt into database: %v", err)
+		return err
+	}
+	return nil
+}

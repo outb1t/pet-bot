@@ -4,6 +4,7 @@ services:
   bot:
     build: .
     environment:
+      - WEB_SERVER_PORT=${WEB_SERVER_PORT}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - ALLOWED_CHAT_ID=${ALLOWED_CHAT_ID}
       - TEST_CHAT_ID=${TEST_CHAT_ID}
@@ -25,10 +26,14 @@ services:
       - BOT_DEFAULT_PHRASE8=${BOT_DEFAULT_PHRASE8}
       - GPT_MODEL_FOR_CHATTING=${GPT_MODEL_FOR_CHATTING}
       - GPT_MODEL_FOR_GPT_COMMAND=${GPT_MODEL_FOR_GPT_COMMAND}
+      - BASIC_AUTH_USERNAME=${BASIC_AUTH_USERNAME}
+      - BASIC_AUTH_PASSWORD=${BASIC_AUTH_PASSWORD}
     depends_on:
       - db
     networks:
       - app-network
+    ports:
+      - ${WEB_SERVER_PORT}:${WEB_SERVER_PORT}
 
   db:
     image: mysql:8.0

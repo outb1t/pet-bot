@@ -1,16 +1,20 @@
 package main
 
 import (
+	"encoding/base64"
 	"fmt"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"html/template"
 	"log"
 	"math/rand"
+	"net/http"
 	"os"
 	"pet.outbid.goapp/api"
 	"pet.outbid.goapp/db"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 )
 
@@ -30,6 +34,14 @@ var (
 )
 
 func main() {
+	initApp()
+
+	go startWebServer()
+
+	handleUpdates()
+}
+
+func initApp() {
 	botToken := getStringFromEnv("TELEGRAM_BOT_TOKEN")
 	allowedChatID = getInt64FromEnv("ALLOWED_CHAT_ID")
 	testChatID = getInt64FromEnv("TEST_CHAT_ID")
@@ -53,13 +65,122 @@ func main() {
 	if err := db.InitDB(); err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
-	defer db.DB.Close()
 
 	log.Printf("Authorized on account %s", botUsername)
 	log.Printf("Bot restricted to chat ID: %d", allowedChatID)
 	log.Printf("Bot restricted to TEST chat ID: %d", testChatID)
+}
 
-	handleUpdates()
+func startWebServer() {
+	username := getStringFromEnv("BASIC_AUTH_USERNAME")
+	password := getStringFromEnv("BASIC_AUTH_PASSWORD")
+
+	http.HandleFunc("/", basicAuth(username, password, indexHandler))
+	http.HandleFunc("/save", basicAuth(username, password, saveHandler))
+	port := os.Getenv("WEB_SERVER_PORT")
+	if port == "" {
+		port = "8080"
+	}
+	log.Println("Starting web server on : " + port)
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
+		log.Printf("Failed to start web server: %v", err)
+	}
+}
+
+func basicAuth(username, password string, handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if auth == "" {
+			w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		const prefix = "Basic "
+		if !strings.HasPrefix(auth, prefix) {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		decoded, err := base64.StdEncoding.DecodeString(auth[len(prefix):])
+		if err != nil {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		credentials := strings.SplitN(string(decoded), ":", 2)
+		if len(credentials) != 2 {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		reqUsername, reqPassword := credentials[0], credentials[1]
+		if reqUsername != username || reqPassword != password {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		handler.ServeHTTP(w, r)
+	}
+}
+
+var formTemplate = template.Must(template.New("form").Parse(`
+<!DOCTYPE html>
+<html charset="utf-8">
+<head>
+    <title>Edit Prompt</title>
+    <meta content="text/html; charset=UTF-8" http-equiv="Content-Type">
+</head>
+<body>
+    <h1>Edit Prompt</h1>
+    <form action="/save" method="post">
+        <textarea name="prompt" rows="10" cols="80">{{.Prompt}}</textarea><br/>
+        <input type="submit" value="Save"/>
+    </form>
+</body>
+</html>
+`))
+
+func indexHandler(w http.ResponseWriter, r *http.Request) {
+	// Get the latest prompt from the database
+	promptText, err := db.GetSystemPrompt()
+	if err != nil {
+		http.Error(w, "Failed to get prompt", http.StatusInternalServerError)
+		return
+	}
+
+	// Render the form with the prompt
+	data := struct {
+		Prompt string
+	}{
+		Prompt: promptText,
+	}
+
+	w.Header().Set("Content-Type", "text/html")
+	if err := formTemplate.Execute(w, data); err != nil {
+		http.Error(w, "Failed to render template", http.StatusInternalServerError)
+	}
+}
+
+func saveHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	prompt := r.FormValue("prompt")
+	if prompt == "" {
+		http.Error(w, "Prompt cannot be empty", http.StatusBadRequest)
+		return
+	}
+
+	err := db.InsertPrompt(prompt, 1)
+	if err != nil {
+		http.Error(w, "Failed to save prompt", http.StatusInternalServerError)
+		return
+	}
+
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 func handleUpdates() {
@@ -271,6 +392,8 @@ func handleMention(message *tgbotapi.Message) {
 	}
 
 	systemPrompt, err := db.GetSystemPrompt()
+	currentDate := strings.ToUpper(time.Now().Format("02-Mar-2006 15:04:05"))
+	systemPrompt = strings.Replace(systemPrompt, "%current_date%", currentDate, 1)
 	if err != nil {
 		log.Fatal(err)
 	}
