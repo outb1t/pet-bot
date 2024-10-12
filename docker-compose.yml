@@ -6,6 +6,7 @@ services:
     environment:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - ALLOWED_CHAT_ID=${ALLOWED_CHAT_ID}
+      - TEST_CHAT_ID=${TEST_CHAT_ID}
       - ADMIN_CHAT_ID=${ADMIN_CHAT_ID}
       - DB_HOST=${DB_HOST}
       - DB_PORT=${DB_PORT}

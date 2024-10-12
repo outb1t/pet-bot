@@ -17,6 +17,7 @@ import (
 var bot *tgbotapi.BotAPI
 var botUsername string
 var allowedChatID int64
+var testChatID int64
 
 var openAIToken string
 var gptModelForChatting string
@@ -30,6 +31,7 @@ var (
 func main() {
 	botToken := getStringFromEnv("TELEGRAM_BOT_TOKEN")
 	allowedChatID = getInt64FromEnv("ALLOWED_CHAT_ID")
+	testChatID = getInt64FromEnv("TEST_CHAT_ID")
 	adminChatID := getInt64FromEnv("ADMIN_CHAT_ID")
 
 	openAIToken = getStringFromEnv("OPENAI_API_KEY")
@@ -54,6 +56,7 @@ func main() {
 
 	log.Printf("Authorized on account %s", botUsername)
 	log.Printf("Bot restricted to chat ID: %d", allowedChatID)
+	log.Printf("Bot restricted to TEST chat ID: %d", testChatID)
 
 	handleUpdates(adminChatID)
 }
@@ -85,7 +88,7 @@ func worker(bot *tgbotapi.BotAPI, jobs <-chan tgbotapi.Update, adminChatID int64
 }
 
 func handleUpdate(bot *tgbotapi.BotAPI, update tgbotapi.Update, adminChatID int64) {
-	if update.Message.Chat.ID != allowedChatID {
+	if update.Message.Chat.ID != allowedChatID && update.Message.Chat.ID != testChatID {
 		alertMsg := tgbotapi.NewMessage(adminChatID, fmt.Sprintf("Unauthorized access attempt from chat ID: %d", update.Message.Chat.ID))
 		sendMessage(alertMsg, false)
 		if update.Message.Chat.IsPrivate() {
@@ -139,13 +142,16 @@ func handleMessage(message *tgbotapi.Message) {
 		return
 	}
 
-	botTagged := strings.Contains(text, botUsername)
 	replyToBotMessage := message.ReplyToMessage != nil && bot.Self.ID == message.ReplyToMessage.From.ID
-	if botTagged || replyToBotMessage {
+	if isBotMentioned(text) || replyToBotMessage {
 		handleMention(message)
 	} else {
 		saveMessage(message, text)
 	}
+}
+
+func isBotMentioned(text string) bool {
+	return strings.Contains(text, botUsername)
 }
 
 func sendMessage(msg tgbotapi.Chattable, saveOptions ...bool) {
@@ -247,6 +253,8 @@ func handleGptCommand(message *tgbotapi.Message) {
 func handleMention(message *tgbotapi.Message) {
 	text := message.Text
 	if strings.Trim(text, ":?! ") == botUsername {
+		// here is the only case when we don't save incoming message, because there is only @%bot_nickname%,
+		//but we save output bot phrase
 		phraseVar := fmt.Sprintf("BOT_DEFAULT_PHRASE%d", rand.Intn(8)+1)
 		msg := tgbotapi.NewMessage(message.Chat.ID, getStringFromEnv(phraseVar))
 		sendMessage(msg)
@@ -255,7 +263,7 @@ func handleMention(message *tgbotapi.Message) {
 
 	saveMessage(message)
 
-	messagesString, err := getFormattedMessages(40)
+	messagesString, err := getFormattedMessages(message.Chat.ID, 40)
 	if err != nil {
 		log.Printf("Error getting formatted messages: %v", err)
 		return
@@ -269,8 +277,13 @@ func handleMention(message *tgbotapi.Message) {
 		systemPrompt += "\n\n**Chat history:**\n" + messagesString
 	}
 
-	if message.ReplyToMessage != nil && bot.Self.ID == message.ReplyToMessage.From.ID {
-		text = fmt.Sprintf("\nthis is reply to your msg%d:\n ", message.ReplyToMessage.MessageID) + text
+	if message.ReplyToMessage != nil {
+		replyMessageId := message.ReplyToMessage.MessageID
+		if bot.Self.ID == message.ReplyToMessage.From.ID {
+			text = fmt.Sprintf("\nthis is reply to your msg%d:\n ", replyMessageId) + text
+		} else if isBotMentioned(text) {
+			text = fmt.Sprintf("You were mentioned to reply to the message msg%d by this message:", replyMessageId) + text
+		}
 	}
 
 	requestBody := api.ChatCompletionRequest{
@@ -305,8 +318,8 @@ func handleMention(message *tgbotapi.Message) {
 	sendMessage(msg)
 }
 
-func getFormattedMessages(limit int) (string, error) {
-	messages, err := db.GetLastMessages(allowedChatID, limit)
+func getFormattedMessages(chatId int64, limit int) (string, error) {
+	messages, err := db.GetLastMessages(chatId, limit)
 	if err != nil {
 		return "", fmt.Errorf("Error retrieving messages: %v", err)
 	}
@@ -321,7 +334,7 @@ func getFormattedMessages(limit int) (string, error) {
 		if !exists {
 			chatMemberConfig := tgbotapi.GetChatMemberConfig{
 				ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
-					ChatID: allowedChatID,
+					ChatID: chatId,
 					UserID: msg.UserID,
 				},
 			}
