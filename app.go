@@ -18,6 +18,7 @@ var bot *tgbotapi.BotAPI
 var botUsername string
 var allowedChatID int64
 var testChatID int64
+var adminChatID int64
 
 var openAIToken string
 var gptModelForChatting string
@@ -32,7 +33,7 @@ func main() {
 	botToken := getStringFromEnv("TELEGRAM_BOT_TOKEN")
 	allowedChatID = getInt64FromEnv("ALLOWED_CHAT_ID")
 	testChatID = getInt64FromEnv("TEST_CHAT_ID")
-	adminChatID := getInt64FromEnv("ADMIN_CHAT_ID")
+	adminChatID = getInt64FromEnv("ADMIN_CHAT_ID")
 
 	openAIToken = getStringFromEnv("OPENAI_API_KEY")
 	gptModelForChatting = getStringFromEnv("GPT_MODEL_FOR_CHATTING")
@@ -58,10 +59,10 @@ func main() {
 	log.Printf("Bot restricted to chat ID: %d", allowedChatID)
 	log.Printf("Bot restricted to TEST chat ID: %d", testChatID)
 
-	handleUpdates(adminChatID)
+	handleUpdates()
 }
 
-func handleUpdates(adminChatID int64) {
+func handleUpdates() {
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
 
@@ -71,7 +72,7 @@ func handleUpdates(adminChatID int64) {
 	jobs := make(chan tgbotapi.Update, 100)
 
 	for i := 0; i < workerCount; i++ {
-		go worker(bot, jobs, adminChatID)
+		go worker(bot, jobs)
 	}
 
 	for update := range updates {
@@ -81,13 +82,13 @@ func handleUpdates(adminChatID int64) {
 	}
 }
 
-func worker(bot *tgbotapi.BotAPI, jobs <-chan tgbotapi.Update, adminChatID int64) {
+func worker(bot *tgbotapi.BotAPI, jobs <-chan tgbotapi.Update) {
 	for update := range jobs {
-		handleUpdate(bot, update, adminChatID)
+		handleUpdate(bot, update)
 	}
 }
 
-func handleUpdate(bot *tgbotapi.BotAPI, update tgbotapi.Update, adminChatID int64) {
+func handleUpdate(bot *tgbotapi.BotAPI, update tgbotapi.Update) {
 	if update.Message.Chat.ID != allowedChatID && update.Message.Chat.ID != testChatID {
 		alertMsg := tgbotapi.NewMessage(adminChatID, fmt.Sprintf("Unauthorized access attempt from chat ID: %d", update.Message.Chat.ID))
 		sendMessage(alertMsg, false)
