@@ -26,7 +26,7 @@ var (
 	promptCache      string
 	promptCacheTime  time.Time
 	promptCacheMutex sync.RWMutex
-	cacheDuration    = 15 * time.Second
+	cacheDuration    = 10 * time.Second
 )
 
 func InitDB() error {
@@ -102,9 +102,9 @@ func GetLastMessages(chatID int64, limit int) ([]Message, error) {
 	return messages, nil
 }
 
-func GetSystemPrompt() (string, error) {
+func GetSystemPrompt(useCache bool) (string, error) {
 	promptCacheMutex.RLock()
-	if time.Since(promptCacheTime) < cacheDuration && promptCache != "" {
+	if useCache && time.Since(promptCacheTime) < cacheDuration && promptCache != "" {
 		cachedPrompt := promptCache
 		promptCacheMutex.RUnlock()
 		return cachedPrompt, nil
@@ -114,7 +114,7 @@ func GetSystemPrompt() (string, error) {
 	promptCacheMutex.Lock()
 	defer promptCacheMutex.Unlock()
 
-	if time.Since(promptCacheTime) < cacheDuration && promptCache != "" {
+	if useCache && time.Since(promptCacheTime) < cacheDuration && promptCache != "" {
 		return promptCache, nil
 	}
 

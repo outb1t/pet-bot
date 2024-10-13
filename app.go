@@ -75,6 +75,9 @@ func startWebServer() {
 	username := getStringFromEnv("BASIC_AUTH_USERNAME")
 	password := getStringFromEnv("BASIC_AUTH_PASSWORD")
 
+	fs := http.FileServer(http.Dir("web/static"))
+	http.Handle("/static/", http.StripPrefix("/static/", fs))
+
 	http.HandleFunc("/", basicAuth(username, password, indexHandler))
 	http.HandleFunc("/save", basicAuth(username, password, saveHandler))
 	port := os.Getenv("WEB_SERVER_PORT")
@@ -110,13 +113,13 @@ func basicAuth(username, password string, handler http.HandlerFunc) http.Handler
 
 		credentials := strings.SplitN(string(decoded), ":", 2)
 		if len(credentials) != 2 {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 			return
 		}
 
 		reqUsername, reqPassword := credentials[0], credentials[1]
 		if reqUsername != username || reqPassword != password {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 			return
 		}
 
@@ -124,32 +127,23 @@ func basicAuth(username, password string, handler http.HandlerFunc) http.Handler
 	}
 }
 
-var formTemplate = template.Must(template.New("form").Parse(`
-<!DOCTYPE html>
-<html charset="utf-8">
-<head>
-    <title>Edit Prompt</title>
-    <meta content="text/html; charset=UTF-8" http-equiv="Content-Type">
-</head>
-<body>
-    <h1>Edit Prompt</h1>
-    <form action="/save" method="post">
-        <textarea name="prompt" rows="10" cols="80">{{.Prompt}}</textarea><br/>
-        <input type="submit" value="Save"/>
-    </form>
-</body>
-</html>
-`))
-
 func indexHandler(w http.ResponseWriter, r *http.Request) {
-	// Get the latest prompt from the database
-	promptText, err := db.GetSystemPrompt()
+	templateContent, err := os.ReadFile("web/index.html")
 	if err != nil {
-		http.Error(w, "Failed to get prompt", http.StatusInternalServerError)
+		fmt.Println(err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 
-	// Render the form with the prompt
+	var formTemplate = template.Must(template.New("form").Parse(string(templateContent)))
+
+	promptText, err := db.GetSystemPrompt(false)
+	if err != nil {
+		fmt.Println(err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+
 	data := struct {
 		Prompt string
 	}{
@@ -391,7 +385,7 @@ func handleMention(message *tgbotapi.Message) {
 		return
 	}
 
-	systemPrompt, err := db.GetSystemPrompt()
+	systemPrompt, err := db.GetSystemPrompt(true)
 	currentDate := strings.ToUpper(time.Now().Format("02-Mar-2006 15:04:05"))
 	systemPrompt = strings.Replace(systemPrompt, "%current_date%", currentDate, 1)
 	if err != nil {
