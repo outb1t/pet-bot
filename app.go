@@ -270,7 +270,7 @@ func isBotMentioned(text string) bool {
 	return strings.Contains(text, botUsername)
 }
 
-func sendMessage(msg tgbotapi.Chattable, saveOptions ...bool) {
+func sendMessage(msg tgbotapi.MessageConfig, saveOptions ...bool) {
 	save := true
 	if len(saveOptions) > 0 {
 		save = saveOptions[0]
@@ -279,6 +279,8 @@ func sendMessage(msg tgbotapi.Chattable, saveOptions ...bool) {
 	newMessage, err := bot.Send(msg)
 	if err != nil {
 		log.Printf("Error sending message: %v", err)
+		_, _ = bot.Send(tgbotapi.NewMessage(msg.ChatID, fmt.Sprintf("Error sending message: %v", err)))
+		return
 	}
 
 	if save {
@@ -379,7 +381,7 @@ func handleMention(message *tgbotapi.Message) {
 
 	saveMessage(message)
 
-	messagesString, err := getFormattedMessages(message.Chat.ID, 40)
+	messagesString, err := getFormattedMessages(message.Chat.ID, 300)
 	if err != nil {
 		log.Printf("Error getting formatted messages: %v", err)
 		return
