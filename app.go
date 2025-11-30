@@ -3,19 +3,20 @@ package main
 import (
 	"encoding/base64"
 	"fmt"
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"html/template"
 	"log"
 	"math/rand"
 	"net/http"
 	"os"
-	"pet.outbid.goapp/api"
-	"pet.outbid.goapp/db"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"pet.outbid.goapp/api"
+	"pet.outbid.goapp/db"
 )
 
 var bot *tgbotapi.BotAPI
@@ -337,8 +338,16 @@ func handleGptCommand(message *tgbotapi.Message) {
 	}
 	saveMessage(message, args)
 
+	reasoning := "high"
+	verbosity := "medium"
+	temp := float32(0.2)
+	maxTokens := 512
 	requestBody := api.ChatCompletionRequest{
-		Model: gptModelForGptCommand,
+		Model:           gptModelForChatting,
+		ReasoningEffort: &reasoning,
+		Verbosity:       &verbosity,
+		Temperature:     &temp,
+		MaxOutputTokens: &maxTokens,
 		Messages: []api.Message{
 			{
 				Role:    "system",
@@ -406,8 +415,16 @@ func handleMention(message *tgbotapi.Message) {
 		}
 	}
 
+	reasoning := "low"
+	verbosity := "low"
+	temp := float32(0.5)
+	maxTokens := 256
 	requestBody := api.ChatCompletionRequest{
-		Model: gptModelForChatting,
+		Model:           gptModelForChatting,
+		ReasoningEffort: &reasoning,
+		Verbosity:       &verbosity,
+		Temperature:     &temp,
+		MaxOutputTokens: &maxTokens,
 		Messages: []api.Message{
 			{
 				Role:    "system",
