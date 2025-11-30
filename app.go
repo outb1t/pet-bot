@@ -379,8 +379,8 @@ func handleGptCommand(message *tgbotapi.Message) {
 func handleMention(message *tgbotapi.Message) {
 	text := message.Text
 	if strings.Trim(text, ":?! ") == botUsername {
-		// here is the only case when we don't save incoming message, because there is only @%bot_nickname%,
-		//but we save output bot phrase
+		// here is the only case when we don't save an incoming message, because there is only @%bot_nickname%,
+		// but we save output bot phrase
 		phraseVar := fmt.Sprintf("BOT_DEFAULT_PHRASE%d", rand.Intn(8)+1)
 		msg := tgbotapi.NewMessage(message.Chat.ID, getStringFromEnv(phraseVar))
 		sendMessage(msg)
@@ -420,8 +420,24 @@ func handleMention(message *tgbotapi.Message) {
 		}
 
 		lower := strings.ToLower(s)
-		if strings.Contains(lower, "загугли") || strings.Contains(lower, "поищи") {
-			return true
+
+		triggers := []string{
+			"загугли",
+			"погугли",
+			"найди",
+			"поищи",
+			"google",
+			"search",
+		}
+		for _, t := range triggers {
+			if t == "" {
+				continue
+			}
+
+			tLower := strings.ToLower(t)
+			if strings.Contains(lower, tLower) {
+				return true
+			}
 		}
 
 		urlPattern := `(?i)\b(?:https?://|www\.)\S+`
@@ -468,13 +484,11 @@ func handleMention(message *tgbotapi.Message) {
 	}
 
 	completionResponse, err := api.GetChatCompletion(openAIToken, requestBody)
-	if err != nil {
-		fmt.Printf("Error getting chat completion: %v\n", err)
-		return
-	}
-
 	var gptResponseText string
-	if len(completionResponse.Choices) > 0 {
+
+	if err != nil {
+		gptResponseText = fmt.Sprintf("Error getting chat completion: %v\n", err)
+	} else if len(completionResponse.Choices) > 0 {
 		gptResponseText = completionResponse.Choices[0].Message.Content
 	} else {
 		gptResponseText = "No choices in response"
@@ -482,7 +496,7 @@ func handleMention(message *tgbotapi.Message) {
 
 	msg := tgbotapi.NewMessage(message.Chat.ID, gptResponseText)
 	msg.ReplyToMessageID = message.MessageID
-	sendMessage(msg)
+	sendMessage(msg, err == nil)
 }
 
 func getFormattedMessages(chatId int64, limit int) (string, error) {
