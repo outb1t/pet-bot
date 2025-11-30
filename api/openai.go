@@ -15,10 +15,8 @@ type ChatCompletionRequest struct {
 	ReasoningEffort *string `json:"reasoning_effort,omitempty"` // "none", "minimal", "low", "medium", "high"
 	Verbosity       *string `json:"verbosity,omitempty"`        // "low", "medium", "high"
 
-	Temperature     *float32 `json:"temperature,omitempty"`
-	TopP            *float32 `json:"top_p,omitempty"`
-	MaxOutputTokens *int     `json:"max_output_tokens,omitempty"`
-	N               *int     `json:"n,omitempty"`
+	TopP *float32 `json:"top_p,omitempty"`
+	N    *int     `json:"n,omitempty"`
 
 	Store *bool `json:"store,omitempty"`
 }

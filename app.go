@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,6 +29,7 @@ var adminChatID int64
 var openAIToken string
 var gptModelForChatting string
 var gptModelForGptCommand string
+var gptModelForWebSearch string
 
 var (
 	usernames     = make(map[int64]string)
@@ -52,6 +54,7 @@ func initApp() {
 	gptModelForChatting = getStringFromEnv("GPT_MODEL_FOR_CHATTING")
 	fmt.Printf("Bot chat model: %s\n", gptModelForChatting)
 	gptModelForGptCommand = getStringFromEnv("GPT_MODEL_FOR_GPT_COMMAND")
+	gptModelForWebSearch = getStringFromEnv("GPT_MODEL_FOR_WEB_SEARCH")
 	fmt.Printf("Bot /gpt model: %s\n", gptModelForGptCommand)
 
 	var botErr error
@@ -307,7 +310,8 @@ func handleHelpCommand(message *tgbotapi.Message) {
 		"/help - List available commands\n" +
 		"/getinfo - Get your account information\n" +
 		"/gpt - Forward message to gpt\n" +
-		"Tag me @buddy_bro_pet_bot if you want to chat with me"
+		"Tag me @buddy_bro_pet_bot if you want to chat with me\n" +
+		"Если использовать \"загугли\", \"поищи\" или ссылку в сообщении, то будет веб поиск(очень долго думает секунд 30-60)"
 	msg := tgbotapi.NewMessage(message.Chat.ID, helpText)
 	sendMessage(msg, false)
 }
@@ -340,14 +344,10 @@ func handleGptCommand(message *tgbotapi.Message) {
 
 	reasoning := "high"
 	verbosity := "medium"
-	temp := float32(0.2)
-	maxTokens := 512
 	requestBody := api.ChatCompletionRequest{
 		Model:           gptModelForChatting,
 		ReasoningEffort: &reasoning,
 		Verbosity:       &verbosity,
-		Temperature:     &temp,
-		MaxOutputTokens: &maxTokens,
 		Messages: []api.Message{
 			{
 				Role:    "system",
@@ -376,7 +376,6 @@ func handleGptCommand(message *tgbotapi.Message) {
 	msg.ReplyToMessageID = message.MessageID
 	sendMessage(msg)
 }
-
 func handleMention(message *tgbotapi.Message) {
 	text := message.Text
 	if strings.Trim(text, ":?! ") == botUsername {
@@ -397,7 +396,7 @@ func handleMention(message *tgbotapi.Message) {
 	}
 
 	systemPrompt, err := db.GetSystemPrompt(true)
-	currentDate := strings.ToUpper(time.Now().Format("02-Mar-2006 15:04:05"))
+	currentDate := strings.ToUpper(time.Now().Format("02-Jan-2006 15:04:05"))
 	systemPrompt = strings.Replace(systemPrompt, "%current_date%", currentDate, 1)
 	if err != nil {
 		log.Fatal(err)
@@ -415,16 +414,47 @@ func handleMention(message *tgbotapi.Message) {
 		}
 	}
 
-	reasoning := "low"
-	verbosity := "low"
-	temp := float32(0.5)
-	maxTokens := 256
+	containsTrigger := func(s string) bool {
+		if s == "" {
+			return false
+		}
+
+		lower := strings.ToLower(s)
+		if strings.Contains(lower, "загугли") || strings.Contains(lower, "поищи") {
+			return true
+		}
+
+		urlPattern := `(?i)\b(?:https?://|www\.)\S+`
+		matched, _ := regexp.MatchString(urlPattern, s)
+		return matched
+	}
+
+	useSearchModel := containsTrigger(text)
+	if !useSearchModel && message.ReplyToMessage != nil {
+		useSearchModel = containsTrigger(message.ReplyToMessage.Text)
+	}
+
+	modelName := gptModelForChatting
+	if useSearchModel {
+		modelName = gptModelForWebSearch
+	}
+
+	var reasoning *string
+	var verbosity *string
+	if useSearchModel {
+		verbosity = nil
+		reasoning = nil
+	} else {
+		v := "low"
+		verbosity = &v
+		r := "low"
+		reasoning = &r
+	}
+
 	requestBody := api.ChatCompletionRequest{
-		Model:           gptModelForChatting,
-		ReasoningEffort: &reasoning,
-		Verbosity:       &verbosity,
-		Temperature:     &temp,
-		MaxOutputTokens: &maxTokens,
+		Model:           modelName,
+		ReasoningEffort: reasoning,
+		Verbosity:       verbosity,
 		Messages: []api.Message{
 			{
 				Role:    "system",
