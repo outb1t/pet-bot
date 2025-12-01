@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"html/template"
+	"io"
 	"log"
 	"math/rand"
 	"net/http"
@@ -257,17 +258,79 @@ func handleMessage(message *tgbotapi.Message) {
 		text = message.Text
 	} else if message.Caption != "" {
 		text = message.Caption
+	} else if len(message.Photo) > 0 {
+		// If the message contains a photo with no text/caption
+		replyToBotMessage := message.ReplyToMessage != nil && bot.Self.ID == message.ReplyToMessage.From.ID
+		if replyToBotMessage {
+			// If it's a reply to the bot's message, handle it as a bot mention (including the image)
+			handleMention(message)
+		} else {
+			// Not directed at bot: we won’t process the image (ignore it)
+			//_, err := downloadImageAsDataURL(message)
+			//if err != nil {
+			//	log.Println("error downloading image:", err)
+			//}
+			log.Printf("Received image without text (message_id: %d), ignoring.", message.MessageID)
+		}
+		return
 	} else {
+		// No text, no caption, no photo: ignore other non-text messages (stickers, etc.)
 		log.Printf("Received non-text message without caption (message_id: %d), ignoring.", message.MessageID)
 		return
 	}
 
+	// Determine if the message is addressing the bot
 	replyToBotMessage := message.ReplyToMessage != nil && bot.Self.ID == message.ReplyToMessage.From.ID
 	if isBotMentioned(text) || replyToBotMessage {
 		handleMention(message)
 	} else {
 		saveMessage(message, text)
 	}
+}
+
+func downloadImageAsDataURL(message *tgbotapi.Message) (string, error) {
+	if len(message.Photo) == 0 {
+		return "", fmt.Errorf("no photo in message")
+	}
+
+	// Take the highest resolution photo (last in slice)
+	photo := message.Photo[len(message.Photo)-1]
+
+	file, err := bot.GetFile(tgbotapi.FileConfig{FileID: photo.FileID})
+	if err != nil {
+		return "", fmt.Errorf("failed to get file info from Telegram: %w", err)
+	}
+
+	fileURL := file.Link(bot.Token)
+
+	resp, err := http.Get(fileURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to download image: %w", err)
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read image body: %w", err)
+	}
+
+	// Size limit, e.g. 2 MB
+	const maxImageSize = 2 * 1024 * 1024
+	if len(data) > maxImageSize {
+		return "", fmt.Errorf("image too large (%d bytes), limit is %d bytes", len(data), maxImageSize)
+	}
+
+	contentType := resp.Header.Get("Content-Type")
+	// Force image/*, otherwise OpenAI ругается
+	if contentType == "" || !strings.HasPrefix(strings.ToLower(contentType), "image/") {
+		// safest default
+		contentType = "image/jpeg"
+	}
+
+	b64 := base64.StdEncoding.EncodeToString(data)
+	dataURL := fmt.Sprintf("data:%s;base64,%s", contentType, b64)
+
+	return dataURL, nil
 }
 
 func isBotMentioned(text string) bool {
@@ -368,7 +431,7 @@ func handleGptCommand(message *tgbotapi.Message) {
 
 	var txt string
 	if len(completionResponse.Choices) > 0 {
-		txt = completionResponse.Choices[0].Message.Content
+		txt = messageContentToString(completionResponse.Choices[0].Message.Content)
 	} else {
 		txt = "No choices in response"
 	}
@@ -378,6 +441,9 @@ func handleGptCommand(message *tgbotapi.Message) {
 }
 func handleMention(message *tgbotapi.Message) {
 	text := message.Text
+	if text == "" && message.Caption != "" {
+		text = message.Caption
+	}
 	if strings.Trim(text, ":?! ") == botUsername {
 		// here is the only case when we don't save an incoming message, because there is only @%bot_nickname%,
 		// but we save output bot phrase
@@ -404,16 +470,6 @@ func handleMention(message *tgbotapi.Message) {
 	if messagesString != "" {
 		systemPrompt += "\n\n**Chat history:**\n" + messagesString
 	}
-
-	if message.ReplyToMessage != nil {
-		replyMessageId := message.ReplyToMessage.MessageID
-		if bot.Self.ID == message.ReplyToMessage.From.ID {
-			text = fmt.Sprintf("\nthis is reply to your msg%d:\n ", replyMessageId) + text
-		} else if isBotMentioned(text) {
-			text = fmt.Sprintf("You were mentioned to reply to the message msg%d by this message:", replyMessageId) + text
-		}
-	}
-
 	containsTrigger := func(s string) bool {
 		if s == "" {
 			return false
@@ -445,51 +501,96 @@ func handleMention(message *tgbotapi.Message) {
 		return matched
 	}
 
+	// If replying to a message, prepend context info to the user text as before
+	if message.ReplyToMessage != nil {
+		replyMessageId := message.ReplyToMessage.MessageID
+		if bot.Self.ID == message.ReplyToMessage.From.ID {
+			// Reply to a bot message
+			if text == "" {
+				// If no user text, still indicate reply context
+				text = fmt.Sprintf("this is reply to your msg%d:", replyMessageId)
+			} else {
+				text = fmt.Sprintf("this is reply to your msg%d:\n ", replyMessageId) + text
+			}
+		} else if isBotMentioned(text) {
+			// Bot was mentioned in a reply to someone else's message
+			text = fmt.Sprintf("You were mentioned to reply to the message msg%d by this message:", replyMessageId) + text
+		}
+	}
+
+	var photoSource *tgbotapi.Message
+	if len(message.Photo) > 0 {
+		photoSource = message
+	} else if message.ReplyToMessage != nil && len(message.ReplyToMessage.Photo) > 0 {
+		photoSource = message.ReplyToMessage
+	}
+
+	// Prepare the user content for the model (include image if present)
+	var userContent interface{}
+	if photoSource != nil {
+		dataURL, err := downloadImageAsDataURL(photoSource)
+		if err != nil {
+			log.Printf("Error retrieving image: %v", err)
+			errMsg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("Error processing image: %v", err))
+			sendMessage(errMsg, false)
+			return
+		}
+
+		// multi-part контент: текст (если есть) + картинка
+		contentList := []map[string]interface{}{}
+		if text != "" {
+			contentList = append(contentList, map[string]interface{}{
+				"type": "text",
+				"text": text,
+			})
+		}
+		contentList = append(contentList, map[string]interface{}{
+			"type": "image_url",
+			"image_url": map[string]string{
+				"url": dataURL,
+			},
+		})
+		userContent = contentList
+	} else {
+		// нет картинки ни в этом сообщении, ни в реплае
+		userContent = text
+	}
+
+	// Determine which model to use (web search or normal) based on triggers
 	useSearchModel := containsTrigger(text)
 	if !useSearchModel && message.ReplyToMessage != nil {
 		useSearchModel = containsTrigger(message.ReplyToMessage.Text)
 	}
-
 	modelName := gptModelForChatting
 	if useSearchModel {
 		modelName = gptModelForWebSearch
 	}
-
+	// Set reasoning/verbosity (as before)
 	var reasoning *string
 	var verbosity *string
-	if useSearchModel {
-		verbosity = nil
-		reasoning = nil
-	} else {
-		v := "low"
-		verbosity = &v
-		r := "low"
-		reasoning = &r
+	if !useSearchModel {
+		v, r := "low", "low"
+		verbosity, reasoning = &v, &r
 	}
 
+	// Create the chat completion request with system prompt and user content
 	requestBody := api.ChatCompletionRequest{
 		Model:           modelName,
 		ReasoningEffort: reasoning,
 		Verbosity:       verbosity,
 		Messages: []api.Message{
-			{
-				Role:    "system",
-				Content: systemPrompt,
-			},
-			{
-				Role:    "user",
-				Content: text,
-			},
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: userContent},
 		},
 	}
 
 	completionResponse, err := api.GetChatCompletion(openAIToken, requestBody)
-	var gptResponseText string
 
+	var gptResponseText string
 	if err != nil {
 		gptResponseText = fmt.Sprintf("Error getting chat completion: %v\n", err)
 	} else if len(completionResponse.Choices) > 0 {
-		gptResponseText = completionResponse.Choices[0].Message.Content
+		gptResponseText = messageContentToString(completionResponse.Choices[0].Message.Content)
 	} else {
 		gptResponseText = "No choices in response"
 	}
@@ -497,6 +598,39 @@ func handleMention(message *tgbotapi.Message) {
 	msg := tgbotapi.NewMessage(message.Chat.ID, gptResponseText)
 	msg.ReplyToMessageID = message.MessageID
 	sendMessage(msg, err == nil)
+}
+
+func messageContentToString(content interface{}) string {
+	// Most common case – plain string
+	if s, ok := content.(string); ok {
+		return s
+	}
+
+	// If model ever sends multi-part content (array of segments)
+	if parts, ok := content.([]interface{}); ok {
+		var sb strings.Builder
+		for _, p := range parts {
+			m, ok := p.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			t, _ := m["type"].(string)
+			switch t {
+			case "text":
+				if txt, ok := m["text"].(string); ok {
+					sb.WriteString(txt)
+				}
+			}
+		}
+		if sb.Len() > 0 {
+			return sb.String()
+		}
+		// Fallback: dump as %v so хоть что-то вернём
+		return fmt.Sprintf("%v", content)
+	}
+
+	// Fallback for any other unexpected shape
+	return fmt.Sprintf("%v", content)
 }
 
 func getFormattedMessages(chatId int64, limit int) (string, error) {

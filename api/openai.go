@@ -21,11 +21,6 @@ type ChatCompletionRequest struct {
 	Store *bool `json:"store,omitempty"`
 }
 
-type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
 type ChatCompletionResponse struct {
 	ID                string   `json:"id"`
 	Object            string   `json:"object"`
@@ -36,11 +31,16 @@ type ChatCompletionResponse struct {
 	Usage             Usage    `json:"usage"`
 }
 
+type Message struct {
+	Role    string      `json:"role"`
+	Content interface{} `json:"content"` // can be string or []{type,text/image_url}
+}
+
 type Choice struct {
-	Index        int         `json:"index"`
-	Message      Message     `json:"message"`
-	Logprobs     interface{} `json:"logprobs"`
-	FinishReason string      `json:"finish_reason"`
+	Index        int     `json:"index"`
+	Message      Message `json:"message"`
+	Logprobs     any     `json:"logprobs"`
+	FinishReason string  `json:"finish_reason"`
 }
 
 type Usage struct {
