@@ -273,6 +273,16 @@ func handleMessage(message *tgbotapi.Message) {
 			log.Printf("Received image without text (message_id: %d), ignoring.", message.MessageID)
 		}
 		return
+	} else if message.Sticker != nil {
+		// Sticker without text/caption
+		replyToBotMessage := message.ReplyToMessage != nil && bot.Self.ID == message.ReplyToMessage.From.ID
+		if replyToBotMessage {
+			// Reply to bot with a sticker -> treat as mention with image
+			handleMention(message)
+		} else {
+			log.Printf("Received sticker without text (message_id: %d), ignoring.", message.MessageID)
+		}
+		return
 	} else {
 		// No text, no caption, no photo: ignore other non-text messages (stickers, etc.)
 		log.Printf("Received non-text message without caption (message_id: %d), ignoring.", message.MessageID)
@@ -289,14 +299,25 @@ func handleMessage(message *tgbotapi.Message) {
 }
 
 func downloadImageAsDataURL(message *tgbotapi.Message) (string, error) {
-	if len(message.Photo) == 0 {
-		return "", fmt.Errorf("no photo in message")
+	if len(message.Photo) == 0 && message.Sticker == nil {
+		return "", fmt.Errorf("no photo or sticker in message")
 	}
 
-	// Take the highest resolution photo (last in slice)
-	photo := message.Photo[len(message.Photo)-1]
+	var fileID string
 
-	file, err := bot.GetFile(tgbotapi.FileConfig{FileID: photo.FileID})
+	if len(message.Photo) > 0 {
+		// Use highest resolution photo (last in slice)
+		photo := message.Photo[len(message.Photo)-1]
+		fileID = photo.FileID
+	} else if message.Sticker != nil {
+		// Skip animated stickers, they are not simple images
+		if message.Sticker.IsAnimated {
+			return "", fmt.Errorf("animated stickers are not supported")
+		}
+		fileID = message.Sticker.FileID
+	}
+
+	file, err := bot.GetFile(tgbotapi.FileConfig{FileID: fileID})
 	if err != nil {
 		return "", fmt.Errorf("failed to get file info from Telegram: %w", err)
 	}
@@ -321,9 +342,7 @@ func downloadImageAsDataURL(message *tgbotapi.Message) (string, error) {
 	}
 
 	contentType := resp.Header.Get("Content-Type")
-	// Force image/*, otherwise OpenAI ругается
 	if contentType == "" || !strings.HasPrefix(strings.ToLower(contentType), "image/") {
-		// safest default
 		contentType = "image/jpeg"
 	}
 
@@ -345,8 +364,18 @@ func sendMessage(msg tgbotapi.MessageConfig, saveOptions ...bool) {
 
 	newMessage, err := bot.Send(msg)
 	if err != nil {
+		// If markdown parsing failed – retry without formatting
+		if strings.Contains(err.Error(), "can't parse entities") {
+			log.Printf("Markdown parse error: %v, retrying without parse_mode", err)
+			msg.ParseMode = ""
+			newMessage, err = bot.Send(msg)
+		}
+	}
+
+	if err != nil {
 		log.Printf("Error sending message: %v", err)
-		_, _ = bot.Send(tgbotapi.NewMessage(msg.ChatID, fmt.Sprintf("Error sending message: %v", err)))
+		_, _ = bot.Send(tgbotapi.NewMessage(msg.ChatID,
+			fmt.Sprintf("Error sending message: %v", err)))
 		return
 	}
 
@@ -437,6 +466,7 @@ func handleGptCommand(message *tgbotapi.Message) {
 	}
 	msg := tgbotapi.NewMessage(message.Chat.ID, txt)
 	msg.ReplyToMessageID = message.MessageID
+	msg.ParseMode = tgbotapi.ModeMarkdownV2
 	sendMessage(msg)
 }
 func handleMention(message *tgbotapi.Message) {
@@ -480,6 +510,7 @@ func handleMention(message *tgbotapi.Message) {
 		triggers := []string{
 			"загугли",
 			"погугли",
+			"гугли",
 			"найди",
 			"поищи",
 			"google",
@@ -518,17 +549,18 @@ func handleMention(message *tgbotapi.Message) {
 		}
 	}
 
-	var photoSource *tgbotapi.Message
-	if len(message.Photo) > 0 {
-		photoSource = message
-	} else if message.ReplyToMessage != nil && len(message.ReplyToMessage.Photo) > 0 {
-		photoSource = message.ReplyToMessage
+	var mediaSource *tgbotapi.Message
+	if len(message.Photo) > 0 || message.Sticker != nil {
+		mediaSource = message
+	} else if message.ReplyToMessage != nil &&
+		(len(message.ReplyToMessage.Photo) > 0 || message.ReplyToMessage.Sticker != nil) {
+		mediaSource = message.ReplyToMessage
 	}
 
 	// Prepare the user content for the model (include image if present)
 	var userContent interface{}
-	if photoSource != nil {
-		dataURL, err := downloadImageAsDataURL(photoSource)
+	if mediaSource != nil {
+		dataURL, err := downloadImageAsDataURL(mediaSource)
 		if err != nil {
 			log.Printf("Error retrieving image: %v", err)
 			errMsg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("Error processing image: %v", err))
@@ -536,7 +568,6 @@ func handleMention(message *tgbotapi.Message) {
 			return
 		}
 
-		// multi-part контент: текст (если есть) + картинка
 		contentList := []map[string]interface{}{}
 		if text != "" {
 			contentList = append(contentList, map[string]interface{}{
@@ -552,7 +583,6 @@ func handleMention(message *tgbotapi.Message) {
 		})
 		userContent = contentList
 	} else {
-		// нет картинки ни в этом сообщении, ни в реплае
 		userContent = text
 	}
 
@@ -597,6 +627,7 @@ func handleMention(message *tgbotapi.Message) {
 
 	msg := tgbotapi.NewMessage(message.Chat.ID, gptResponseText)
 	msg.ReplyToMessageID = message.MessageID
+	msg.ParseMode = tgbotapi.ModeMarkdownV2
 	sendMessage(msg, err == nil)
 }
 
