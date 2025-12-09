@@ -31,6 +31,7 @@ var openAIToken string
 var gptModelForChatting string
 var gptModelForGptCommand string
 var gptModelForWebSearch string
+var gptModelForRouting string
 
 var (
 	usernames     = make(map[int64]string)
@@ -208,6 +209,10 @@ func initApp() {
 	gptModelForGptCommand = getStringFromEnv("GPT_MODEL_FOR_GPT_COMMAND")
 	gptModelForWebSearch = getStringFromEnv("GPT_MODEL_FOR_WEB_SEARCH")
 	fmt.Printf("Bot /gpt model: %s\n", gptModelForGptCommand)
+	gptModelForRouting = os.Getenv("GPT_MODEL_FOR_ROUTING")
+	if gptModelForRouting != "" {
+		fmt.Printf("Bot routing model: %s\n", gptModelForRouting)
+	}
 
 	var botErr error
 	bot, botErr = tgbotapi.NewBotAPI(botToken)
@@ -631,6 +636,7 @@ func handleGptCommand(message *tgbotapi.Message) {
 	sendMessage(msg)
 }
 func handleMention(message *tgbotapi.Message) {
+	fmt.Println("handleMention")
 	text := message.Text
 	if text == "" && message.Caption != "" {
 		text = message.Caption
@@ -645,38 +651,6 @@ func handleMention(message *tgbotapi.Message) {
 	//}
 
 	saveMessage(message)
-
-	containsTrigger := func(s string) bool {
-		if s == "" {
-			return false
-		}
-
-		lower := strings.ToLower(s)
-
-		triggers := []string{
-			"загугли",
-			"погугли",
-			"гугли",
-			"найди",
-			"поищи",
-			"google",
-			"search",
-		}
-		for _, t := range triggers {
-			if t == "" {
-				continue
-			}
-
-			tLower := strings.ToLower(t)
-			if strings.Contains(lower, tLower) {
-				return true
-			}
-		}
-
-		urlPattern := `(?i)\b(?:https?://|www\.)\S+`
-		matched, _ := regexp.MatchString(urlPattern, s)
-		return matched
-	}
 
 	// If replying to a message, prepend context info to the user text as before
 	if message.ReplyToMessage != nil {
@@ -733,10 +707,13 @@ func handleMention(message *tgbotapi.Message) {
 	}
 
 	// Determine which model to use (web search or normal) based on triggers
-	useSearchModel := containsTrigger(text)
-	if !useSearchModel && message.ReplyToMessage != nil {
-		useSearchModel = containsTrigger(message.ReplyToMessage.Text)
+	replyContext := ""
+	if message.ReplyToMessage != nil {
+		replyContext = message.ReplyToMessage.Text
 	}
+
+	useSearchModel := shouldUseWebSearch(text, replyContext)
+	fmt.Println("useSearchModel: %v\n", useSearchModel)
 	modelName := gptModelForChatting
 	if useSearchModel && mediaSource == nil {
 		modelName = gptModelForWebSearch
@@ -829,6 +806,97 @@ func messageContentToString(content interface{}) string {
 
 	// Fallback for any other unexpected shape
 	return fmt.Sprintf("%v", content)
+}
+
+func containsTrigger(s string) bool {
+	if s == "" {
+		return false
+	}
+
+	lower := strings.ToLower(s)
+
+	triggers := []string{
+		"загугли",
+		"погугли",
+		"гугли",
+		"найди",
+		"поищи",
+		"google",
+		"search",
+	}
+	for _, t := range triggers {
+		if t == "" {
+			continue
+		}
+
+		tLower := strings.ToLower(t)
+		if strings.Contains(lower, tLower) {
+			return true
+		}
+	}
+
+	urlPattern := `(?i)\b(?:https?://|www\.)\S+`
+	matched, _ := regexp.MatchString(urlPattern, s)
+	return matched
+}
+
+func shouldUseWebSearch(userText, replyText string) bool {
+	combined := strings.TrimSpace(userText)
+	if replyText != "" {
+		combined = strings.TrimSpace(combined + "\n" + replyText)
+	}
+
+	if containsTrigger(combined) {
+		return true
+	}
+	fmt.Println("gptModelForRouting: %s\n", gptModelForRouting)
+
+	if combined == "" || gptModelForRouting == "" {
+		return false
+	}
+
+	requestBody := api.ChatCompletionRequest{
+		Model: gptModelForRouting,
+		Messages: []api.Message{
+			{
+				Role: "system",
+				Content: "You are a router. Decide if the user text requires live web search. " +
+					"Return exactly one token: SEARCH (if web search is needed) or NO_SEARCH (if not). " +
+					"Use SEARCH for queries asking to search, containing URLs, or requesting fresh info; otherwise NO_SEARCH.",
+			},
+			{
+				Role:    "user",
+				Content: fmt.Sprintf("Message to classify:\n%s", combined),
+			},
+		},
+	}
+
+	resp, err := api.GetChatCompletion(openAIToken, requestBody)
+	fmt.Println("resp: %v\n", resp)
+	if err != nil {
+		log.Println("Routing model error: %v", err)
+		return false
+	}
+
+	if len(resp.Choices) == 0 {
+		return false
+	}
+
+	decision := strings.ToUpper(strings.TrimSpace(messageContentToString(resp.Choices[0].Message.Content)))
+
+	// Use only the first token to avoid substring collisions (e.g., NO_SEARCH contains SEARCH).
+	if fields := strings.Fields(decision); len(fields) > 0 {
+		decision = fields[0]
+	}
+	decision = strings.Trim(decision, " .!,")
+
+	if strings.HasPrefix(decision, "NO_SEARCH") {
+		return false
+	}
+	if strings.HasPrefix(decision, "SEARCH") {
+		return true
+	}
+	return false
 }
 
 func getFormattedMessages(chatId int64, limit int) (string, error) {
