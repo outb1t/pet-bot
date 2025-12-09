@@ -3,10 +3,10 @@ package main
 import (
 	"encoding/base64"
 	"fmt"
+	"html"
 	"html/template"
 	"io"
 	"log"
-	"math/rand"
 	"net/http"
 	"os"
 	"regexp"
@@ -36,6 +36,157 @@ var (
 	usernames     = make(map[int64]string)
 	usernamesLock sync.RWMutex
 )
+
+// Minimal HTML formatting for Telegram: keeps code blocks, converts headers
+// to bold, supports bold/italic and inline links, and escapes the rest.
+func formatHTML(text string) string {
+	lines := strings.Split(text, "\n")
+	var b strings.Builder
+	inCode := false
+
+	hrRe := regexp.MustCompile(`^-{3,}$`)
+	linkRe := regexp.MustCompile(`\[(.+?)\]\((https?://[^\s)]+)\)`)
+	boldRe := regexp.MustCompile(`\*\*(.+?)\*\*`)
+	italicRe := regexp.MustCompile(`\*(.+?)\*`)
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			if inCode {
+				b.WriteString("</code></pre>")
+				inCode = false
+			} else {
+				b.WriteString("<pre><code>")
+				inCode = true
+			}
+			if i < len(lines)-1 {
+				b.WriteString("\n")
+			}
+			continue
+		}
+
+		if inCode {
+			b.WriteString(html.EscapeString(line))
+		} else {
+			if hrRe.MatchString(trimmed) {
+				dashCount := len(trimmed)
+				if dashCount < 3 {
+					dashCount = 3
+				}
+				line = "<b>" + strings.Repeat("&mdash;", dashCount) + "</b>"
+				b.WriteString(line)
+				if i < len(lines)-1 {
+					b.WriteString("\n")
+				}
+				continue
+			}
+
+			if strings.HasPrefix(trimmed, "#") {
+				content := strings.TrimSpace(strings.TrimLeft(trimmed, "#"))
+				line = "<b>" + html.EscapeString(content) + "</b>"
+			} else {
+				escaped := html.EscapeString(line)
+				escaped = linkRe.ReplaceAllStringFunc(escaped, func(s string) string {
+					m := linkRe.FindStringSubmatch(s)
+					return `<a href="` + html.EscapeString(m[2]) + `">` + html.EscapeString(m[1]) + `</a>`
+				})
+				escaped = boldRe.ReplaceAllStringFunc(escaped, func(s string) string {
+					m := boldRe.FindStringSubmatch(s)
+					return "<b>" + html.EscapeString(m[1]) + "</b>"
+				})
+				escaped = italicRe.ReplaceAllStringFunc(escaped, func(s string) string {
+					m := italicRe.FindStringSubmatch(s)
+					return "<i>" + html.EscapeString(m[1]) + "</i>"
+				})
+				line = escaped
+			}
+			b.WriteString(line)
+		}
+
+		if i < len(lines)-1 {
+			b.WriteString("\n")
+		}
+	}
+
+	if inCode {
+		b.WriteString("</code></pre>")
+	}
+
+	return b.String()
+}
+
+// Telegram MarkdownV2 does not support headings, so we convert them to bold
+// and escape special characters, while preserving fenced code blocks.
+func formatMarkdownV2(text string) string {
+	lines := strings.Split(text, "\n")
+	var b strings.Builder
+	inCode := false
+
+	hrRe := regexp.MustCompile(`^-{3,}$`)
+	escape := strings.NewReplacer(
+		`_`, `\_`,
+		`~`, `\~`,
+		"`", "\\`",
+		`>`, `\>`,
+		`#`, `\#`,
+		`=`, `\=`,
+		`|`, `\|`,
+		`{`, `\{`,
+		`}`, `\}`,
+		`\`, `\\`,
+	)
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			if inCode {
+				b.WriteString("```")
+				if i < len(lines)-1 {
+					b.WriteString("\n")
+				}
+				inCode = false
+			} else {
+				lang := strings.TrimPrefix(trimmed, "```")
+				b.WriteString("```")
+				b.WriteString(lang)
+				if i < len(lines)-1 {
+					b.WriteString("\n")
+				}
+				inCode = true
+			}
+			continue
+		}
+
+		if inCode {
+			b.WriteString(line)
+		} else {
+			if hrRe.MatchString(trimmed) {
+				line = strings.Repeat("-", len(trimmed))
+				b.WriteString(line)
+				if i < len(lines)-1 {
+					b.WriteString("\n")
+				}
+				continue
+			}
+
+			// Replace markdown-style headers (e.g., "### Title") with bold text.
+			if strings.HasPrefix(trimmed, "#") {
+				parts := strings.Fields(trimmed)
+				if len(parts) > 1 {
+					line = "*" + strings.TrimSpace(strings.Join(parts[1:], " ")) + "*"
+				}
+			}
+			line = escape.Replace(line)
+			b.WriteString(line)
+		}
+
+		if i < len(lines)-1 {
+			b.WriteString("\n")
+		}
+	}
+
+	return b.String()
+}
 
 func main() {
 	initApp()
@@ -265,11 +416,6 @@ func handleMessage(message *tgbotapi.Message) {
 			// If it's a reply to the bot's message, handle it as a bot mention (including the image)
 			handleMention(message)
 		} else {
-			// Not directed at bot: we won’t process the image (ignore it)
-			//_, err := downloadImageAsDataURL(message)
-			//if err != nil {
-			//	log.Println("error downloading image:", err)
-			//}
 			log.Printf("Received image without text (message_id: %d), ignoring.", message.MessageID)
 		}
 		return
@@ -357,9 +503,39 @@ func isBotMentioned(text string) bool {
 }
 
 func sendMessage(msg tgbotapi.MessageConfig, saveOptions ...bool) {
+	originalText := msg.Text
 	save := true
 	if len(saveOptions) > 0 {
 		save = saveOptions[0]
+	}
+
+	const longMsgThreshold = 300
+
+	if utf8.RuneCountInString(originalText) > longMsgThreshold {
+		doc := tgbotapi.NewDocument(msg.ChatID, tgbotapi.FileBytes{
+			Name:  "reply.txt",
+			Bytes: []byte(originalText),
+		})
+		doc.ReplyToMessageID = msg.ReplyToMessageID
+		doc.AllowSendingWithoutReply = msg.AllowSendingWithoutReply
+
+		newMessage, err := bot.Send(doc)
+		if err != nil {
+			log.Printf("Error sending long message as document: %v", err)
+			_, _ = bot.Send(tgbotapi.NewMessage(msg.ChatID,
+				fmt.Sprintf("Error sending message: %v", err)))
+			return
+		}
+
+		if save {
+			saveMessage(&newMessage)
+		}
+		return
+	}
+
+	if msg.ParseMode == tgbotapi.ModeMarkdownV2 {
+		msg.ParseMode = tgbotapi.ModeHTML
+		msg.Text = formatHTML(originalText)
 	}
 
 	newMessage, err := bot.Send(msg)
@@ -368,6 +544,7 @@ func sendMessage(msg tgbotapi.MessageConfig, saveOptions ...bool) {
 		if strings.Contains(err.Error(), "can't parse entities") {
 			log.Printf("Markdown parse error: %v, retrying without parse_mode", err)
 			msg.ParseMode = ""
+			msg.Text = originalText
 			newMessage, err = bot.Send(msg)
 		}
 	}
@@ -474,32 +651,17 @@ func handleMention(message *tgbotapi.Message) {
 	if text == "" && message.Caption != "" {
 		text = message.Caption
 	}
-	if strings.Trim(text, ":?! ") == botUsername {
-		// here is the only case when we don't save an incoming message, because there is only @%bot_nickname%,
-		// but we save output bot phrase
-		phraseVar := fmt.Sprintf("BOT_DEFAULT_PHRASE%d", rand.Intn(8)+1)
-		msg := tgbotapi.NewMessage(message.Chat.ID, getStringFromEnv(phraseVar))
-		sendMessage(msg)
-		return
-	}
+	//if strings.Trim(text, ":?! ") == botUsername {
+	//	// here is the only case when we don't save an incoming message, because there is only @%bot_nickname%,
+	//	// but we save output bot phrase
+	//	phraseVar := fmt.Sprintf("BOT_DEFAULT_PHRASE%d", rand.Intn(8)+1)
+	//	msg := tgbotapi.NewMessage(message.Chat.ID, getStringFromEnv(phraseVar))
+	//	sendMessage(msg)
+	//	return
+	//}
 
 	saveMessage(message)
 
-	messagesString, err := getFormattedMessages(message.Chat.ID, 300)
-	if err != nil {
-		log.Printf("Error getting formatted messages: %v", err)
-		return
-	}
-
-	systemPrompt, err := db.GetSystemPrompt(true)
-	currentDate := strings.ToUpper(time.Now().Format("02-Jan-2006 15:04:05"))
-	systemPrompt = strings.Replace(systemPrompt, "%current_date%", currentDate, 1)
-	if err != nil {
-		log.Fatal(err)
-	}
-	if messagesString != "" {
-		systemPrompt += "\n\n**Chat history:**\n" + messagesString
-	}
 	containsTrigger := func(s string) bool {
 		if s == "" {
 			return false
@@ -592,7 +754,7 @@ func handleMention(message *tgbotapi.Message) {
 		useSearchModel = containsTrigger(message.ReplyToMessage.Text)
 	}
 	modelName := gptModelForChatting
-	if useSearchModel {
+	if useSearchModel && mediaSource == nil {
 		modelName = gptModelForWebSearch
 	}
 	// Set reasoning/verbosity (as before)
@@ -601,6 +763,27 @@ func handleMention(message *tgbotapi.Message) {
 	if !useSearchModel {
 		v, r := "low", "low"
 		verbosity, reasoning = &v, &r
+	}
+
+	limit := 300
+	if useSearchModel {
+		limit = 10
+	}
+
+	messagesString, err := getFormattedMessages(message.Chat.ID, limit)
+	if err != nil {
+		log.Printf("Error getting formatted messages: %v", err)
+		return
+	}
+
+	systemPrompt, err := db.GetSystemPrompt(true)
+	currentDate := strings.ToUpper(time.Now().Format("02-Jan-2006 15:04:05"))
+	systemPrompt = strings.Replace(systemPrompt, "%current_date%", currentDate, 1)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if messagesString != "" {
+		systemPrompt += "\n\n**Chat history:**\n" + messagesString
 	}
 
 	// Create the chat completion request with system prompt and user content
