@@ -511,31 +511,15 @@ func sendMessage(msg tgbotapi.MessageConfig, saveOptions ...bool) {
 
 	const longMsgThreshold = 300
 
-	if utf8.RuneCountInString(originalText) > longMsgThreshold {
-		doc := tgbotapi.NewDocument(msg.ChatID, tgbotapi.FileBytes{
-			Name:  "reply.txt",
-			Bytes: []byte(originalText),
-		})
-		doc.ReplyToMessageID = msg.ReplyToMessageID
-		doc.AllowSendingWithoutReply = msg.AllowSendingWithoutReply
-
-		newMessage, err := bot.Send(doc)
-		if err != nil {
-			log.Printf("Error sending long message as document: %v", err)
-			_, _ = bot.Send(tgbotapi.NewMessage(msg.ChatID,
-				fmt.Sprintf("Error sending message: %v", err)))
-			return
-		}
-
-		if save {
-			saveMessage(&newMessage)
-		}
-		return
-	}
-
 	if msg.ParseMode == tgbotapi.ModeMarkdownV2 {
 		msg.ParseMode = tgbotapi.ModeHTML
-		msg.Text = formatHTML(originalText)
+		formatted := formatHTML(originalText)
+		if utf8.RuneCountInString(originalText) > longMsgThreshold {
+			// Try Telegram's expandable blockquote entity via HTML.
+			msg.Text = `<blockquote expandable="true">` + formatted + `</blockquote>`
+		} else {
+			msg.Text = formatted
+		}
 	}
 
 	newMessage, err := bot.Send(msg)
