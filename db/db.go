@@ -15,11 +15,12 @@ import (
 var DB *sql.DB
 
 type Message struct {
-	MessageID int
-	ChatID    int64
-	UserID    int64
-	Text      string
-	Date      time.Time
+	MessageID      int
+	ChatID         int64
+	UserID         int64
+	Text           string
+	AggregatedText *string
+	Date           time.Time
 }
 
 var (
@@ -54,12 +55,12 @@ func InitDB() error {
 	return nil
 }
 
-func SaveMessage(messageID int, chatID int64, userID int64, text string, date int) error {
+func SaveMessage(messageID int, chatID int64, userID int64, text string, aggregatedText *string, date int) error {
 	query := `
-        INSERT INTO messages (message_id, chat_id, user_id, text, date)
-        VALUES (?, ?, ?, ?, FROM_UNIXTIME(?))
+        INSERT INTO messages (message_id, chat_id, user_id, text, aggregated_text, date)
+        VALUES (?, ?, ?, ?, ?, FROM_UNIXTIME(?))
     `
-	_, err := DB.Exec(query, messageID, chatID, userID, text, date)
+	_, err := DB.Exec(query, messageID, chatID, userID, text, aggregatedText, date)
 	if err != nil {
 		log.Printf("Error saving message to database: %v", err)
 		return err
@@ -71,7 +72,7 @@ func GetLastMessages(chatID int64, limit int) ([]Message, error) {
 	query := `
         SELECT *
         FROM (
-            SELECT message_id, chat_id, user_id, text, date
+            SELECT message_id, chat_id, user_id, text, aggregated_text, date
             FROM messages
             WHERE chat_id = ?
             ORDER BY date DESC
@@ -89,8 +90,12 @@ func GetLastMessages(chatID int64, limit int) ([]Message, error) {
 	var messages []Message
 	for rows.Next() {
 		var msg Message
-		if err := rows.Scan(&msg.MessageID, &msg.ChatID, &msg.UserID, &msg.Text, &msg.Date); err != nil {
+		var aggregated sql.NullString
+		if err := rows.Scan(&msg.MessageID, &msg.ChatID, &msg.UserID, &msg.Text, &aggregated, &msg.Date); err != nil {
 			return nil, fmt.Errorf("Error scanning row: %v", err)
+		}
+		if aggregated.Valid {
+			msg.AggregatedText = &aggregated.String
 		}
 		messages = append(messages, msg)
 	}

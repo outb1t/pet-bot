@@ -546,7 +546,7 @@ func sendMessage(msg tgbotapi.MessageConfig, saveOptions ...bool) {
 	}
 
 	if save {
-		saveMessage(&newMessage)
+		saveMessage(&newMessage, originalText)
 	}
 }
 
@@ -636,7 +636,6 @@ func handleGptCommand(message *tgbotapi.Message) {
 	sendMessage(msg)
 }
 func handleMention(message *tgbotapi.Message) {
-	fmt.Println("handleMention")
 	text := message.Text
 	if text == "" && message.Caption != "" {
 		text = message.Caption
@@ -899,6 +898,45 @@ func shouldUseWebSearch(userText, replyText string) bool {
 	return false
 }
 
+func aggregateBotMessage(text string) (*string, error) {
+	requestBody := api.ChatCompletionRequest{
+		Model: gptModelForChatting,
+		Messages: []api.Message{
+			{
+				Role: "system",
+				Content: "You are a summarizer. Create a concise summary of the assistant's reply in 150-300 characters. " +
+					"Keep key facts, names, and numbers. Return plain text without markdown, lists, or introductions.",
+			},
+			{
+				Role:    "user",
+				Content: fmt.Sprintf("Summarize this reply:\n%s", text),
+			},
+		},
+	}
+
+	resp, err := api.GetChatCompletion(openAIToken, requestBody)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(resp.Choices) == 0 {
+		return nil, fmt.Errorf("no choices in aggregation response")
+	}
+
+	summary := strings.TrimSpace(messageContentToString(resp.Choices[0].Message.Content))
+	if summary == "" {
+		return nil, fmt.Errorf("empty aggregation response")
+	}
+
+	const maxSummaryLength = 300
+	if utf8.RuneCountInString(summary) > maxSummaryLength {
+		summaryRunes := []rune(summary)
+		summary = string(summaryRunes[:maxSummaryLength])
+	}
+
+	return &summary, nil
+}
+
 func getFormattedMessages(chatId int64, limit int) (string, error) {
 	messages, err := db.GetLastMessages(chatId, limit)
 	if err != nil {
@@ -941,11 +979,12 @@ func getFormattedMessages(chatId int64, limit int) (string, error) {
 
 		formattedDate := msg.Date.Format("02.01.2006 15:04:05")
 
-		if msg.UserID == bot.Self.ID && utf8.RuneCountInString(msg.Text) > 400 {
-			fmt.Printf("\nSkipping bot message %d", msg.MessageID)
-			continue
+		messageText := msg.Text
+		if msg.AggregatedText != nil && *msg.AggregatedText != "" {
+			messageText = *msg.AggregatedText
 		}
-		messageLine := fmt.Sprintf("msg%d %s %s : %s\n", msg.MessageID, formattedDate, username, msg.Text)
+
+		messageLine := fmt.Sprintf("msg%d %s %s : %s\n", msg.MessageID, formattedDate, username, messageText)
 		sb.WriteString(messageLine)
 	}
 
@@ -970,11 +1009,23 @@ func saveMessage(message *tgbotapi.Message, texts ...string) {
 		return
 	}
 
+	var aggregatedText *string
+	isBotMessage := message.From != nil && message.From.ID == bot.Self.ID
+	if isBotMessage && utf8.RuneCountInString(text) > 300 {
+		summary, err := aggregateBotMessage(text)
+		if err != nil {
+			log.Printf("Error aggregating bot message %d: %v", message.MessageID, err)
+		} else {
+			aggregatedText = summary
+		}
+	}
+
 	err := db.SaveMessage(
 		message.MessageID,
 		message.Chat.ID,
 		message.From.ID,
 		text,
+		aggregatedText,
 		message.Date,
 	)
 	if err != nil {

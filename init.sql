@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS messages
     chat_id    BIGINT   NOT NULL,
     user_id    BIGINT   NOT NULL,
     text       TEXT,
+    aggregated_text TEXT,
     date       DATETIME NOT NULL
 );
 
