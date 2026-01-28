@@ -20,6 +20,8 @@ FROM alpine:latest
 
 WORKDIR /app
 
+RUN apk add --no-cache ffmpeg
+
 # Copy the built binary from the builder stage
 COPY --from=builder /app/app .
 COPY web ./web
