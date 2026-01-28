@@ -54,6 +54,15 @@ type CompletionTokensDetails struct {
 	ReasoningTokens int `json:"reasoning_tokens"`
 }
 
+// ChatOptions wraps optional chat completion parameters to keep call sites tidy.
+type ChatOptions struct {
+	Reasoning *string
+	Verbosity *string
+	TopP      *float32
+	N         *int
+	Store     *bool
+}
+
 func GetChatCompletion(apiKey string, requestBody ChatCompletionRequest) (*ChatCompletionResponse, error) {
 	jsonData, err := json.Marshal(requestBody)
 	if err != nil {
@@ -91,4 +100,19 @@ func GetChatCompletion(apiKey string, requestBody ChatCompletionRequest) (*ChatC
 	}
 
 	return &completionResponse, nil
+}
+
+// CallChatCompletion builds the request and invokes GetChatCompletion.
+func CallChatCompletion(apiKey string, model string, messages []Message, opts ChatOptions) (*ChatCompletionResponse, error) {
+	requestBody := ChatCompletionRequest{
+		Model:           model,
+		Messages:        messages,
+		ReasoningEffort: opts.Reasoning,
+		Verbosity:       opts.Verbosity,
+		TopP:            opts.TopP,
+		N:               opts.N,
+		Store:           opts.Store,
+	}
+
+	return GetChatCompletion(apiKey, requestBody)
 }

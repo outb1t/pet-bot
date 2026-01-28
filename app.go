@@ -1,15 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
 	"html"
 	"html/template"
+	"image/gif"
+	"image/png"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,6 +40,18 @@ var gptModelForRouting string
 var (
 	usernames     = make(map[int64]string)
 	usernamesLock sync.RWMutex
+)
+
+type mediaGroupEntry struct {
+	messages map[int]*tgbotapi.Message
+	updated  time.Time
+}
+
+const mediaGroupCacheTTL = 1 * time.Hour
+
+var (
+	mediaGroupCache     = make(map[string]*mediaGroupEntry)
+	mediaGroupCacheLock sync.Mutex
 )
 
 // Minimal HTML formatting for Telegram: keeps code blocks, converts headers
@@ -409,29 +425,21 @@ func getInt64FromEnv(name string) int64 {
 }
 
 func handleMessage(message *tgbotapi.Message) {
+	recordMediaGroup(message)
+
 	var text string
 	if message.Text != "" {
 		text = message.Text
 	} else if message.Caption != "" {
 		text = message.Caption
-	} else if len(message.Photo) > 0 {
-		// If the message contains a photo with no text/caption
+	} else if hasSupportedMedia(message) {
+		// If the message contains media with no text/caption
 		replyToBotMessage := message.ReplyToMessage != nil && bot.Self.ID == message.ReplyToMessage.From.ID
 		if replyToBotMessage {
-			// If it's a reply to the bot's message, handle it as a bot mention (including the image)
+			// If it's a reply to the bot's message, handle it as a bot mention (including the media)
 			handleMention(message)
 		} else {
-			log.Printf("Received image without text (message_id: %d), ignoring.", message.MessageID)
-		}
-		return
-	} else if message.Sticker != nil {
-		// Sticker without text/caption
-		replyToBotMessage := message.ReplyToMessage != nil && bot.Self.ID == message.ReplyToMessage.From.ID
-		if replyToBotMessage {
-			// Reply to bot with a sticker -> treat as mention with image
-			handleMention(message)
-		} else {
-			log.Printf("Received sticker without text (message_id: %d), ignoring.", message.MessageID)
+			log.Printf("Received media without text (message_id: %d), ignoring.", message.MessageID)
 		}
 		return
 	} else {
@@ -449,58 +457,341 @@ func handleMessage(message *tgbotapi.Message) {
 	}
 }
 
-func downloadImageAsDataURL(message *tgbotapi.Message) (string, error) {
-	if len(message.Photo) == 0 && message.Sticker == nil {
-		return "", fmt.Errorf("no photo or sticker in message")
-	}
+type mediaItem struct {
+	FileID   string
+	MimeType string
+	FileName string
+	Kind     string
+}
 
-	var fileID string
+func hasSupportedMedia(message *tgbotapi.Message) bool {
+	if message == nil {
+		return false
+	}
 
 	if len(message.Photo) > 0 {
-		// Use highest resolution photo (last in slice)
-		photo := message.Photo[len(message.Photo)-1]
-		fileID = photo.FileID
-	} else if message.Sticker != nil {
-		// Skip animated stickers, they are not simple images
-		if message.Sticker.IsAnimated {
-			return "", fmt.Errorf("animated stickers are not supported")
-		}
-		fileID = message.Sticker.FileID
+		return true
 	}
 
+	if message.Sticker != nil {
+		return !message.Sticker.IsAnimated
+	}
+
+	if message.Animation != nil {
+		return isGifByMeta(message.Animation.MimeType, message.Animation.FileName) || message.Animation.Thumbnail != nil
+	}
+
+	if message.Document != nil {
+		mimeType := strings.ToLower(message.Document.MimeType)
+		if strings.HasPrefix(mimeType, "image/") {
+			return true
+		}
+		name := strings.ToLower(message.Document.FileName)
+		return strings.HasSuffix(name, ".gif")
+	}
+
+	return false
+}
+
+func mediaGroupKey(chatID int64, groupID string) string {
+	return fmt.Sprintf("%d:%s", chatID, groupID)
+}
+
+func cleanupMediaGroupCacheLocked(now time.Time) {
+	cutoff := now.Add(-mediaGroupCacheTTL)
+	for key, entry := range mediaGroupCache {
+		if entry.updated.Before(cutoff) {
+			delete(mediaGroupCache, key)
+		}
+	}
+}
+
+func recordMediaGroup(message *tgbotapi.Message) {
+	if message == nil || message.MediaGroupID == "" || !hasSupportedMedia(message) {
+		return
+	}
+
+	key := mediaGroupKey(message.Chat.ID, message.MediaGroupID)
+
+	mediaGroupCacheLock.Lock()
+	defer mediaGroupCacheLock.Unlock()
+
+	entry := mediaGroupCache[key]
+	if entry == nil {
+		entry = &mediaGroupEntry{
+			messages: make(map[int]*tgbotapi.Message),
+		}
+		mediaGroupCache[key] = entry
+	}
+
+	msgCopy := *message
+	entry.messages[message.MessageID] = &msgCopy
+	entry.updated = time.Now()
+	cleanupMediaGroupCacheLocked(entry.updated)
+}
+
+func getMediaGroupMessages(chatID int64, groupID string) []*tgbotapi.Message {
+	key := mediaGroupKey(chatID, groupID)
+
+	mediaGroupCacheLock.Lock()
+	entry := mediaGroupCache[key]
+	if entry == nil {
+		mediaGroupCacheLock.Unlock()
+		return nil
+	}
+	entry.updated = time.Now()
+	messages := make([]*tgbotapi.Message, 0, len(entry.messages))
+	for _, msg := range entry.messages {
+		messages = append(messages, msg)
+	}
+	mediaGroupCacheLock.Unlock()
+
+	sort.Slice(messages, func(i, j int) bool {
+		return messages[i].MessageID < messages[j].MessageID
+	})
+	return messages
+}
+
+func collectMediaMessages(message *tgbotapi.Message) []*tgbotapi.Message {
+	if message == nil {
+		return nil
+	}
+
+	if hasSupportedMedia(message) {
+		if message.MediaGroupID != "" {
+			groupMessages := getMediaGroupMessages(message.Chat.ID, message.MediaGroupID)
+			if len(groupMessages) > 0 {
+				return groupMessages
+			}
+		}
+		return []*tgbotapi.Message{message}
+	}
+
+	if message.ReplyToMessage != nil && hasSupportedMedia(message.ReplyToMessage) {
+		if message.ReplyToMessage.MediaGroupID != "" {
+			groupMessages := getMediaGroupMessages(message.Chat.ID, message.ReplyToMessage.MediaGroupID)
+			if len(groupMessages) > 0 {
+				return groupMessages
+			}
+		}
+		return []*tgbotapi.Message{message.ReplyToMessage}
+	}
+
+	return nil
+}
+
+func extractMediaItems(message *tgbotapi.Message) []mediaItem {
+	if message == nil {
+		return nil
+	}
+
+	if len(message.Photo) > 0 {
+		photo := message.Photo[len(message.Photo)-1]
+		return []mediaItem{{FileID: photo.FileID, Kind: "photo"}}
+	}
+
+	if message.Sticker != nil {
+		if message.Sticker.IsAnimated {
+			return nil
+		}
+		return []mediaItem{{FileID: message.Sticker.FileID, Kind: "sticker"}}
+	}
+
+	if message.Animation != nil {
+		if isGifByMeta(message.Animation.MimeType, message.Animation.FileName) {
+			return []mediaItem{{
+				FileID:   message.Animation.FileID,
+				MimeType: message.Animation.MimeType,
+				FileName: message.Animation.FileName,
+				Kind:     "animation",
+			}}
+		}
+		if message.Animation.Thumbnail != nil {
+			return []mediaItem{{
+				FileID: message.Animation.Thumbnail.FileID,
+				Kind:   "thumbnail",
+			}}
+		}
+		return nil
+	}
+
+	if message.Document != nil {
+		mimeType := strings.ToLower(message.Document.MimeType)
+		fileName := strings.ToLower(message.Document.FileName)
+		if strings.HasPrefix(mimeType, "image/") || strings.HasSuffix(fileName, ".gif") {
+			return []mediaItem{{
+				FileID:   message.Document.FileID,
+				MimeType: message.Document.MimeType,
+				FileName: message.Document.FileName,
+				Kind:     "document",
+			}}
+		}
+	}
+
+	return nil
+}
+
+func downloadMediaMessagesAsDataURLs(messages []*tgbotapi.Message) ([]string, error) {
+	var urls []string
+	for _, msg := range messages {
+		items := extractMediaItems(msg)
+		for _, item := range items {
+			itemURLs, err := downloadMediaItemAsDataURLs(item)
+			if err != nil {
+				return nil, err
+			}
+			urls = append(urls, itemURLs...)
+		}
+	}
+
+	if len(urls) == 0 {
+		return nil, fmt.Errorf("no supported media found")
+	}
+
+	return urls, nil
+}
+
+func downloadMediaItemAsDataURLs(item mediaItem) ([]string, error) {
+	data, contentType, err := downloadFileBytes(item.FileID)
+	if err != nil {
+		return nil, err
+	}
+	if contentType == "" && item.MimeType != "" {
+		contentType = item.MimeType
+	}
+	return fileDataToDataURLs(data, contentType)
+}
+
+func downloadFileBytes(fileID string) ([]byte, string, error) {
 	file, err := bot.GetFile(tgbotapi.FileConfig{FileID: fileID})
 	if err != nil {
-		return "", fmt.Errorf("failed to get file info from Telegram: %w", err)
+		return nil, "", fmt.Errorf("failed to get file info from Telegram: %w", err)
 	}
 
 	fileURL := file.Link(bot.Token)
 
 	resp, err := http.Get(fileURL)
 	if err != nil {
-		return "", fmt.Errorf("failed to download image: %w", err)
+		return nil, "", fmt.Errorf("failed to download image: %w", err)
 	}
 	defer resp.Body.Close()
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("failed to read image body: %w", err)
+		return nil, "", fmt.Errorf("failed to read image body: %w", err)
 	}
 
 	// Size limit, e.g. 2 MB
 	const maxImageSize = 2 * 1024 * 1024
 	if len(data) > maxImageSize {
-		return "", fmt.Errorf("image too large (%d bytes), limit is %d bytes", len(data), maxImageSize)
+		return nil, "", fmt.Errorf("image too large (%d bytes), limit is %d bytes", len(data), maxImageSize)
 	}
 
 	contentType := resp.Header.Get("Content-Type")
-	if contentType == "" || !strings.HasPrefix(strings.ToLower(contentType), "image/") {
-		contentType = "image/jpeg"
+	if contentType == "" {
+		contentType = http.DetectContentType(data)
 	}
 
-	b64 := base64.StdEncoding.EncodeToString(data)
-	dataURL := fmt.Sprintf("data:%s;base64,%s", contentType, b64)
+	return data, contentType, nil
+}
 
-	return dataURL, nil
+func fileDataToDataURLs(data []byte, contentType string) ([]string, error) {
+	detectedType := http.DetectContentType(data)
+	if contentType == "" {
+		contentType = detectedType
+	}
+
+	if isGIF(data, contentType) || isGIF(data, detectedType) {
+		return gifFramesToDataURLs(data)
+	}
+
+	contentTypeLower := strings.ToLower(contentType)
+	detectedLower := strings.ToLower(detectedType)
+	if strings.HasPrefix(contentTypeLower, "image/") || strings.HasPrefix(detectedLower, "image/") {
+		if !strings.HasPrefix(contentTypeLower, "image/") {
+			contentType = detectedType
+		}
+		return []string{dataToDataURL(data, contentType)}, nil
+	}
+
+	return nil, fmt.Errorf("unsupported media type: %s", contentType)
+}
+
+func dataToDataURL(data []byte, contentType string) string {
+	if contentType == "" {
+		contentType = "image/jpeg"
+	}
+	b64 := base64.StdEncoding.EncodeToString(data)
+	return fmt.Sprintf("data:%s;base64,%s", contentType, b64)
+}
+
+func isGifByMeta(mimeType, fileName string) bool {
+	mimeType = strings.ToLower(mimeType)
+	if strings.Contains(mimeType, "gif") {
+		return true
+	}
+	fileName = strings.ToLower(fileName)
+	return strings.HasSuffix(fileName, ".gif")
+}
+
+func isGIF(data []byte, contentType string) bool {
+	ct := strings.ToLower(contentType)
+	if strings.Contains(ct, "gif") {
+		return true
+	}
+	if len(data) < 6 {
+		return false
+	}
+	return bytes.HasPrefix(data, []byte("GIF87a")) || bytes.HasPrefix(data, []byte("GIF89a"))
+}
+
+func gifFrameIndices(frameCount int) []int {
+	if frameCount <= 0 {
+		return nil
+	}
+
+	second := 0
+	if frameCount > 1 {
+		second = 1
+	}
+	middle := frameCount / 2
+	preLast := 0
+	if frameCount > 1 {
+		preLast = frameCount - 2
+	}
+
+	// If the GIF is very short, some indices can repeat; that's fine.
+	return []int{second, middle, preLast}
+}
+
+func gifFramesToDataURLs(data []byte) ([]string, error) {
+	g, err := gif.DecodeAll(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode gif: %w", err)
+	}
+	if len(g.Image) == 0 {
+		return nil, fmt.Errorf("gif has no frames")
+	}
+
+	indices := gifFrameIndices(len(g.Image))
+	urls := make([]string, 0, len(indices))
+
+	for _, idx := range indices {
+		if idx < 0 || idx >= len(g.Image) {
+			continue
+		}
+		var buf bytes.Buffer
+		if err := png.Encode(&buf, g.Image[idx]); err != nil {
+			return nil, fmt.Errorf("failed to encode gif frame: %w", err)
+		}
+		urls = append(urls, dataToDataURL(buf.Bytes(), "image/png"))
+	}
+
+	if len(urls) == 0 {
+		return nil, fmt.Errorf("gif has no usable frames")
+	}
+
+	return urls, nil
 }
 
 func isBotMentioned(text string) bool {
@@ -602,23 +893,23 @@ func handleGptCommand(message *tgbotapi.Message) {
 
 	reasoning := "high"
 	verbosity := "medium"
-	requestBody := api.ChatCompletionRequest{
-		Model:           gptModelForChatting,
-		ReasoningEffort: &reasoning,
-		Verbosity:       &verbosity,
-		Messages: []api.Message{
-			{
-				Role:    "system",
-				Content: "You are a helpful assistant.",
-			},
-			{
-				Role:    "user",
-				Content: args,
-			},
+	messages := []api.Message{
+		{
+			Role:    "system",
+			Content: "You are a helpful assistant.",
+		},
+		{
+			Role:    "user",
+			Content: args,
 		},
 	}
 
-	completionResponse, err := api.GetChatCompletion(openAIToken, requestBody)
+	completionResponse, err := api.CallChatCompletion(
+		openAIToken,
+		gptModelForChatting,
+		messages,
+		api.ChatOptions{Reasoning: &reasoning, Verbosity: &verbosity},
+	)
 	if err != nil {
 		fmt.Printf("Error getting chat completion: %v\n", err)
 		return
@@ -668,20 +959,14 @@ func handleMention(message *tgbotapi.Message) {
 		}
 	}
 
-	var mediaSource *tgbotapi.Message
-	if len(message.Photo) > 0 || message.Sticker != nil {
-		mediaSource = message
-	} else if message.ReplyToMessage != nil &&
-		(len(message.ReplyToMessage.Photo) > 0 || message.ReplyToMessage.Sticker != nil) {
-		mediaSource = message.ReplyToMessage
-	}
+	mediaMessages := collectMediaMessages(message)
 
 	// Prepare the user content for the model (include image if present)
 	var userContent interface{}
-	if mediaSource != nil {
-		dataURL, err := downloadImageAsDataURL(mediaSource)
+	if len(mediaMessages) > 0 {
+		dataURLs, err := downloadMediaMessagesAsDataURLs(mediaMessages)
 		if err != nil {
-			log.Printf("Error retrieving image: %v", err)
+			log.Printf("Error retrieving media: %v", err)
 			errMsg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("Error processing image: %v", err))
 			sendMessage(errMsg, false)
 			return
@@ -694,12 +979,14 @@ func handleMention(message *tgbotapi.Message) {
 				"text": text,
 			})
 		}
-		contentList = append(contentList, map[string]interface{}{
-			"type": "image_url",
-			"image_url": map[string]string{
-				"url": dataURL,
-			},
-		})
+		for _, dataURL := range dataURLs {
+			contentList = append(contentList, map[string]interface{}{
+				"type": "image_url",
+				"image_url": map[string]string{
+					"url": dataURL,
+				},
+			})
+		}
 		userContent = contentList
 	} else {
 		userContent = text
@@ -714,7 +1001,7 @@ func handleMention(message *tgbotapi.Message) {
 	useSearchModel := shouldUseWebSearch(text, replyContext)
 	fmt.Println("useSearchModel: %v\n", useSearchModel)
 	modelName := gptModelForChatting
-	if useSearchModel && mediaSource == nil {
+	if useSearchModel && len(mediaMessages) == 0 {
 		modelName = gptModelForWebSearch
 	}
 	// Set reasoning/verbosity (as before)
@@ -747,17 +1034,17 @@ func handleMention(message *tgbotapi.Message) {
 	}
 
 	// Create the chat completion request with system prompt and user content
-	requestBody := api.ChatCompletionRequest{
-		Model:           modelName,
-		ReasoningEffort: reasoning,
-		Verbosity:       verbosity,
-		Messages: []api.Message{
-			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: userContent},
-		},
+	messages := []api.Message{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: userContent},
 	}
 
-	completionResponse, err := api.GetChatCompletion(openAIToken, requestBody)
+	completionResponse, err := api.CallChatCompletion(
+		openAIToken,
+		modelName,
+		messages,
+		api.ChatOptions{Reasoning: reasoning, Verbosity: verbosity},
+	)
 
 	var gptResponseText string
 	if err != nil {
@@ -870,7 +1157,7 @@ func shouldUseWebSearch(userText, replyText string) bool {
 		},
 	}
 
-	resp, err := api.GetChatCompletion(openAIToken, requestBody)
+	resp, err := api.CallChatCompletion(openAIToken, requestBody.Model, requestBody.Messages, api.ChatOptions{})
 	fmt.Println("resp: %v\n", resp)
 	if err != nil {
 		log.Println("Routing model error: %v", err)
@@ -899,22 +1186,19 @@ func shouldUseWebSearch(userText, replyText string) bool {
 }
 
 func aggregateBotMessage(text string) (*string, error) {
-	requestBody := api.ChatCompletionRequest{
-		Model: gptModelForChatting,
-		Messages: []api.Message{
-			{
-				Role: "system",
-				Content: "You are a summarizer. Create a concise summary of the assistant's reply in 150-300 characters. " +
-					"Keep key facts, names, and numbers. Return plain text without markdown, lists, or introductions.",
-			},
-			{
-				Role:    "user",
-				Content: fmt.Sprintf("Summarize this reply:\n%s", text),
-			},
+	messages := []api.Message{
+		{
+			Role: "system",
+			Content: "You are a summarizer. Create a concise summary of the assistant's reply in 150-300 characters. " +
+				"Keep key facts, names, and numbers. Return plain text without markdown, lists, or introductions.",
+		},
+		{
+			Role:    "user",
+			Content: fmt.Sprintf("Summarize this reply:\n%s", text),
 		},
 	}
 
-	resp, err := api.GetChatCompletion(openAIToken, requestBody)
+	resp, err := api.CallChatCompletion(openAIToken, gptModelForChatting, messages, api.ChatOptions{})
 	if err != nil {
 		return nil, err
 	}

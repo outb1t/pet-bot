@@ -29,7 +29,8 @@ services:
       - BASIC_AUTH_USERNAME=${BASIC_AUTH_USERNAME}
       - BASIC_AUTH_PASSWORD=${BASIC_AUTH_PASSWORD}
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     networks:
       - app-network
     ports:
@@ -43,10 +44,26 @@ services:
     environment:
       - MYSQL_ROOT_PASSWORD=${DB_PASSWORD}
       - MYSQL_DATABASE=${DB_NAME}
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -p$${MYSQL_ROOT_PASSWORD} --silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
     volumes:
       - db_data:/var/lib/mysql
     networks:
       - app-network
+
+  gofmt:
+    image: golang:1.23
+    profiles:
+      - tools
+    working_dir: /app
+    volumes:
+      - .:/app
+    entrypoint: ["gofmt"]
+    command: ["-w", "."]
 
 volumes:
   db_data:
